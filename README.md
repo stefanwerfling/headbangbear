@@ -15,12 +15,18 @@ Head bang bear is a TypeScript monorepo built around the idea that *"what should
 
 ## Features
 
+### Library sources
+
+- **Local filesystem** — point HBB at a directory of MP3s (configured in `backend/config.json` under `library.rootDir`). Embedded ID3 tags + cover art are extracted via `music-metadata`; no network.
+- **Jellyfin server** — point HBB at a Jellyfin URL + API key in the Settings page. Tracks are listed via the Jellyfin REST API, audio bytes stream straight through to the analyser (`Jellyfin → fetch.body → ffmpeg stdin → essentia`) without ever materialising a local file. Playback proxies Jellyfin's `Items/{id}/Download` with the browser's `Range` header forwarded so seeking works through the proxy. Pagination + `AbortSignal.timeout` handle large libraries / slow upstreams cleanly.
+
 ### Analysis pipeline
 
-- **Audio analysis** via `essentia.js` (WASM) + `ffmpeg` decoding: musical key, BPM, average energy, beat grid, per-second energy timeline, detected drops.
-- **Embedded metadata** (artist / title / album / year / genre + cover art) read from ID3v2 / Vorbis / MP4 atoms via `music-metadata`. No network.
-- **Cover-art cache** on disk (`<library>/.covers/<sha1>.<ext>`), served via a dedicated route.
-- **Two-tier caching** — slow audio analysis (`<library>/.analysis-cache.json`, version-pinned) and fast metadata enrichment (`<library>/.metadata-cache.json`) live in separate files so re-tagging tracks doesn't invalidate key/BPM data.
+- **Audio analysis** via `essentia.js` (WASM) + `ffmpeg` decoding: musical key, BPM, average energy, beat grid, per-second energy timeline, detected drops. The analyzer accepts either a file path (local source) or a `Readable` stream (Jellyfin source) — same essentia pipeline either way.
+- **Embedded metadata** (artist / title / album / year / genre + cover art) read from ID3v2 / Vorbis / MP4 atoms via `music-metadata` for local sources; pulled directly from the Jellyfin item payload for remote sources.
+- **Cover-art cache** on disk for local libraries (`<library>/.covers/<sha1>.<ext>`); proxied live for Jellyfin libraries.
+- **Two-tier caching (local)** — slow audio analysis (`<library>/.analysis-cache.json`, version-pinned) and fast metadata enrichment (`<library>/.metadata-cache.json`) live in separate files so re-tagging tracks doesn't invalidate key/BPM data. **Jellyfin** uses one cache (`<rootDir>/.jellyfin-data/.analysis-cache.json`) keyed by item-ID + `DateModified`.
+- **Background scans with live progress** — the scan runs in a fire-and-forget promise so the HTTP server is up immediately. The Library page polls `GET /api/v1/library/scan-status` and renders a banner with a progress bar; new tracks appear in the table as they're analysed.
 - **Key-detection profile sweep** — re-run essentia with each of `bgate / temperley / krumhansl / edmm / edma / shaath` against your hand-labelled truth, ranked by MIREX score, so you can pick the profile that fits your library best.
 
 ### Domain model
@@ -40,9 +46,10 @@ Head bang bear is a TypeScript monorepo built around the idea that *"what should
 
 ### Browser app
 
-- **Library page** — DJ-mixer style with two decks (cover, artist/title, badges, waveform, beat grid, drop markers, energy curve), 8 hot cues per track, loop in/out, 3-band EQ per deck, tempo + pitch-lock per deck, plan-mix toolbar, sortable/filterable track table (text search + Camelot-compatible toggle + BPM/Energy/Year ranges + Genre dropdown), keyboard shortcuts.
+- **Library page** — DJ-mixer style with two decks (cover, artist/title, badges, waveform, beat grid, drop markers, energy curve), 8 hot cues per track, loop in/out, 3-band EQ per deck, tempo + pitch-lock per deck, plan-mix toolbar, sortable/filterable track table (text search + Camelot-compatible toggle + BPM/Energy/Year ranges + Genre dropdown), keyboard shortcuts. **Live scan banner** — when the backend is mid-scan, a progress bar at the top updates every 2 s and tracks appear in the table as they're analysed.
 - **DJ Set page** — strategy/direction/shape/style/target/avoid-same-artist controls, generated chain table with covers, now-playing card with current track's cover/artist/title, per-side EQ, master EQ, master volume, AutoPlayer pitch-lock, set recording → server-side ffmpeg transcode → 320 kbps MP3 download.
 - **Key Labels page** — labelling UI (24-key dropdown per track) + Profile Sweep card to run essentia against your labels and rank profiles by MIREX score.
+- **Settings page** — pick the library source (Local files vs Jellyfin server). Jellyfin form (URL / API key / optional User ID with auto-discovery) + Test-Connection button with verbose result.
 - **Home page** — landing with audio-intro (autoplay-on-first-visit with disable checkbox), Changelog tab, comprehensive Guide tab (quickstart → per-page walkthroughs → glossary → tips, EN/DE).
 - **Bilingual** — top-right flag switcher (🇺🇸 EN / 🇩🇪 DE), persists in `localStorage`.
 
@@ -53,15 +60,19 @@ Head bang bear is a TypeScript monorepo built around the idea that *"what should
 | Route | Purpose |
 |---|---|
 | `GET /api/v1/library/list` | All analysed tracks with metadata + `hasCover` flag |
-| `POST /api/v1/library/rescan` | Re-run scan (hot-reload after dropping new MP3s in) |
+| `POST /api/v1/library/rescan` | Re-run scan in the background |
+| `GET /api/v1/library/scan-status` | Poll-friendly state of the background scan (current/total/phase/error) |
 | `GET /api/v1/tracks/compatible?path=` | Camelot-compatible matches for a given track |
 | `POST /api/v1/mix/plan` | Plan a single A → B transition |
 | `POST /api/v1/dj-set/plan` | Plan a full chain through the library |
-| `GET /api/v1/library/audio?path=` | Stream a track (Range-supporting) |
-| `GET /api/v1/library/cover?path=` | Stream the cached cover image |
+| `GET /api/v1/library/audio?path=` | Stream a track — `res.sendFile` (local) or Jellyfin proxy with Range forwarding |
+| `GET /api/v1/library/cover?path=` | Stream the track's cover image |
 | `GET /api/v1/library/key-labels` | Read `<library>/truth.json` |
 | `POST /api/v1/library/key-labels` | Replace `<library>/truth.json` |
 | `POST /api/v1/library/profile-sweep` | Run key-detection profile sweep |
+| `GET /api/v1/settings/state` | Read persisted application settings |
+| `POST /api/v1/settings/state` | Replace persisted application settings |
+| `POST /api/v1/settings/jellyfin-test` | Probe a Jellyfin server (no save) |
 | `POST /api/v1/transcode` | WebM/Opus → 320 kbps MP3 (libmp3lame) |
 
 See [`doc/api.md`](doc/api.md) for the full reference.
@@ -95,23 +106,25 @@ See [`doc/api.md`](doc/api.md) for the full reference.
 │   └── src/                     # vts wire schemas shared between backend + frontend
 ├── backend/                     # @headbangbear/backend
 │   ├── src/
-│   │   ├── Analysis/            # Camelot, OpenKey, AudioAnalyzer, DropDetector
-│   │   ├── Audio/               # FfmpegDecoder, FfmpegTranscoder
+│   │   ├── Analysis/            # Camelot, OpenKey, AudioAnalyzer (string | Readable), DropDetector
+│   │   ├── Audio/               # FfmpegDecoder (path or stream), FfmpegTranscoder
 │   │   ├── Cli/                 # analyze, compatible, mix-plan, dj-set, key-eval
 │   │   ├── DjSet/               # DjSetPlanner, BeamSearchDjSetPlanner
 │   │   ├── Eval/                # KeyEvaluator, KeyProfileSweep
-│   │   ├── Library/             # TrackLibrary (scan + cache)
+│   │   ├── Library/             # TrackLibrary (local), JellyfinLibrary (remote)
 │   │   ├── Metadata/            # Id3TagExtractor, CoverArtCache, TrackMetadataCache, LibraryMetadataEnricher
 │   │   ├── Mix/                 # MixTransition (drop / energy / tail-out / early-cut / bar-match)
-│   │   ├── Server/              # HeadbangbearApp + figtree routes
+│   │   ├── Provider/            # JellyfinClient (REST wrapper)
+│   │   ├── Server/              # HeadbangbearApp + figtree routes (dispatching local ⇌ Jellyfin)
+│   │   ├── Settings/            # SettingsStore (JSON persistence + singleton)
 │   │   └── types/               # essentia.js.d.ts
 │   └── tests/                   # mirror of src/ — vitest
 ├── frontend/                    # @headbangbear/frontend — bambooo / AdminLTE SPA
 │   ├── src/
 │   │   ├── inc/
-│   │   │   ├── Api/             # LibraryApi, MixApi, DjSetApi, KeyLabelsApi, KeyProfileSweepApi, TranscodeApi
+│   │   │   ├── Api/             # LibraryApi, MixApi, DjSetApi, KeyLabelsApi, KeyProfileSweepApi, SettingsApi, TranscodeApi
 │   │   │   ├── Net/             # NetFetch, Response, Errors
-│   │   │   ├── Pages/           # Home, Library, DjSet, KeyLabels
+│   │   │   ├── Pages/           # Home, Library, DjSet, KeyLabels, Settings
 │   │   │   ├── Util/            # CamelotUtil, HotCueStore, TrackDisplayUtil
 │   │   │   ├── Widget/          # AutoPlayer, Deck, SetlistStore, TransitionStyleStore
 │   │   │   └── PageLoader.ts

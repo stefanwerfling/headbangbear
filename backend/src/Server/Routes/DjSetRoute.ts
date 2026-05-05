@@ -6,7 +6,8 @@ import {
     type DjSet,
     type DjSetPlannerOptions,
 } from '../../DjSet/DjSetPlanner.js';
-import type { AnalyzedTrack, TrackLibrary } from '../../Library/TrackLibrary.js';
+import type { AnalyzedTrack } from '../../Library/TrackLibrary.js';
+import type { LibraryFacade } from '../LibraryService.js';
 import { DjSetBodySchema, type DjSetBody } from '../schemas.js';
 
 /**
@@ -15,9 +16,9 @@ import { DjSetBodySchema, type DjSetBody } from '../schemas.js';
  * `startPath` is resolved against the library before planning.
  */
 export class DjSetRoute extends DefaultRoute {
-    private readonly library: TrackLibrary;
+    private readonly library: LibraryFacade;
 
-    public constructor(library: TrackLibrary) {
+    public constructor(library: LibraryFacade) {
         super();
         this._uriBase = '/api/';
         this.library = library;

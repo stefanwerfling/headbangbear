@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { DefaultRoute } from 'figtree';
 import { HandlerResultType, type DefaultHandlerReturn } from 'figtree-schemas';
 import { Vts, type ExtractSchemaResultType } from 'vts';
-import type { TrackLibrary } from '../../Library/TrackLibrary.js';
+import type { LibraryService } from '../LibraryService.js';
 
 const AudioQuerySchema = Vts.object({
     path: Vts.string()
@@ -10,48 +10,38 @@ const AudioQuerySchema = Vts.object({
 type AudioQuery = ExtractSchemaResultType<typeof AudioQuerySchema>;
 
 /**
- * `GET /api/v1/library/audio?path=<abs-path>` — streams the requested mp3 with HTTP Range
- * support (express's `res.sendFile()` handles `Range:` headers natively, which is what
- * `wavesurfer.js` and `<audio>` elements need to seek without re-downloading).
+ * `GET /api/v1/library/audio?path=<abs-path>` — streams a track's audio. Local libraries
+ * use `res.sendFile()` (Range-aware out of the box); Jellyfin libraries proxy
+ * `/Items/{id}/Download` with the browser's Range header forwarded so seeking still
+ * works through the proxy.
  *
- * Path is validated against the loaded library so this endpoint cannot be used to read
- * arbitrary files from the host fs.
+ * Path validation lives inside `LibraryService.serveAudio` so a single source of truth
+ * gates filesystem access regardless of provider.
  */
 export class AudioRoute extends DefaultRoute {
-    private readonly library: TrackLibrary;
+    private readonly service: LibraryService;
 
-    public constructor(library: TrackLibrary) {
+    public constructor(service: LibraryService) {
         super();
         this._uriBase = '/api/';
-        this.library = library;
+        this.service = service;
     }
 
     public override getExpressRouter(): Router {
         this._get<unknown, AudioQuery, unknown, unknown, unknown, unknown, unknown, unknown, unknown>(
             this._getUrl('v1', 'library', 'audio'),
             false,
-            async (_req, res, data): Promise<DefaultHandlerReturn> => {
+            async (req, res, data): Promise<DefaultHandlerReturn> => {
                 const path: string | undefined = data.query?.path;
                 if (path === undefined) {
                     res.status(400).send('Missing required query parameter: path');
                     return { type: HandlerResultType.handled };
                 }
-                if (this.library.findByPath(path) === null) {
-                    res.status(404).send('Track not found in library');
-                    return { type: HandlerResultType.handled };
-                }
-                await new Promise<void>((resolve): void => {
-                    res.sendFile(path, {}, (err: Error | undefined): void => {
-                        if (err !== undefined && !res.headersSent) {
-                            res.status(500).send('Failed to stream audio');
-                        }
-                        resolve();
-                    });
-                });
+                await this.service.serveAudio(path, req, res);
                 return { type: HandlerResultType.handled };
             },
             {
-                description: 'Stream the requested track\'s audio file (range-supporting).',
+                description: 'Stream the requested track\'s audio (Range-supporting; proxied for Jellyfin).',
                 tags: ['library'],
                 querySchema: AudioQuerySchema
             }

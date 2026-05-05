@@ -1,12 +1,14 @@
 import { Router } from 'express';
 import { DefaultRoute } from 'figtree';
-import type { TrackLibrary, AnalyzedTrack } from '../../Library/TrackLibrary.js';
-import type { LibraryService } from '../LibraryService.js';
+import type { AnalyzedTrack } from '../../Library/TrackLibrary.js';
+import type { LibraryFacade, LibraryService } from '../LibraryService.js';
 import {
     LibraryResponseSchema,
+    ScanStatusSchema,
     type LibraryResponse,
     type RouteTrack,
-} from '../schemas.js';
+    type ScanStatus,
+} from '@headbangbear/schemas';
 
 /**
  * `GET /api/v1/library/list` — returns the in-memory analysed track list. Cheap; the
@@ -16,7 +18,7 @@ import {
  * Useful when new MP3s are dropped into the configured directory while the server is up.
  */
 export class LibraryRoute extends DefaultRoute {
-    private readonly library: TrackLibrary;
+    private readonly library: LibraryFacade;
 
     private readonly libraryDir: string;
 
@@ -61,6 +63,16 @@ export class LibraryRoute extends DefaultRoute {
                 description: 'Re-scan the library directory; returns the refreshed list.',
                 tags: ['library'],
                 responseBodySchema: LibraryResponseSchema,
+            },
+        );
+        this._get(
+            this._getUrl('v1', 'library', 'scan-status'),
+            false,
+            async (_req, _res, _data): Promise<ScanStatus> => this.service.getScanStatus(),
+            {
+                description: 'Live state of the background library scan (poll while scanning).',
+                tags: ['library'],
+                responseBodySchema: ScanStatusSchema,
             },
         );
         return super.getExpressRouter();

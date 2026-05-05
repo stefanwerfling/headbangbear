@@ -9,6 +9,7 @@ import { DjSet as DjSetPage } from './Pages/DjSet.js';
 import { Home as HomePage } from './Pages/Home.js';
 import { KeyLabels as KeyLabelsPage } from './Pages/KeyLabels.js';
 import { Library as LibraryPage } from './Pages/Library.js';
+import { Settings as SettingsPage } from './Pages/Settings.js';
 
 const LANG_STORAGE_KEY: string = 'hbb.lang.v1';
 
@@ -56,6 +57,12 @@ export class PageLoader implements IPageLoader {
             icon: 'nav-icon fas fa-tag',
             name: 'key-labels',
             page: KeyLabelsPage
+        },
+        {
+            title: new LangText('settings'),
+            icon: 'nav-icon fas fa-cog',
+            name: 'settings',
+            page: SettingsPage
         }
     ];
 

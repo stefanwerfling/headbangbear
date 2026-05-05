@@ -2,8 +2,10 @@ import { NetFetch } from '../Net/NetFetch.js';
 import {
     CompatibleResponseSchema,
     LibraryResponseSchema,
+    ScanStatusSchema,
     type CompatibleResponse,
-    type LibraryResponse
+    type LibraryResponse,
+    type ScanStatus,
 } from '@headbangbear/schemas';
 
 /**
@@ -22,6 +24,10 @@ export class LibraryApi {
     public static async compatible(trackPath: string): Promise<CompatibleResponse> {
         const url: string = `api/v1/tracks/compatible?path=${encodeURIComponent(trackPath)}`;
         return NetFetch.getData(url, CompatibleResponseSchema);
+    }
+
+    public static async scanStatus(): Promise<ScanStatus> {
+        return NetFetch.getData('api/v1/library/scan-status', ScanStatusSchema);
     }
 
 }

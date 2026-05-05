@@ -1,4 +1,4 @@
-import { AudioAnalyzer } from '../Analysis/AudioAnalyzer.js';
+import { AudioAnalyzer, type AnalyzerInput } from '../Analysis/AudioAnalyzer.js';
 import type { AnalysisResult } from '../Analysis/schemas.js';
 
 /**
@@ -10,13 +10,13 @@ import type { AnalysisResult } from '../Analysis/schemas.js';
 export class LazyEssentiaAnalyzer extends AudioAnalyzer {
     private real: AudioAnalyzer | null = null;
 
-    public override async analyze(filePath: string): Promise<AnalysisResult> {
+    public override async analyze(input: AnalyzerInput): Promise<AnalysisResult> {
         if (this.real === null) {
             const module: { EssentiaAudioAnalyzer: new () => AudioAnalyzer } = await import(
                 '../Analysis/EssentiaAudioAnalyzer.js'
             );
             this.real = new module.EssentiaAudioAnalyzer();
         }
-        return this.real.analyze(filePath);
+        return this.real.analyze(input);
     }
 }

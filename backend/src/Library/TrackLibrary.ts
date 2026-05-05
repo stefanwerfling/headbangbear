@@ -37,7 +37,17 @@ export interface AnalyzedTrack {
     hasCover: boolean;
 }
 
-export type ProgressFn = (filePath: string) => void;
+/** Per-track progress event during `TrackLibrary.scan()`. Mirrors `JellyfinLibrary.ScanProgress`
+ *  so `LibraryService` can store one shape regardless of source. */
+export interface ScanProgress {
+    readonly current: number;
+    readonly total: number;
+    readonly name: string;
+    readonly phase: 'analyse' | 'cache' | 'error';
+    readonly detail?: string;
+}
+
+export type ProgressFn = (event: ScanProgress) => void;
 
 export class TrackLibrary {
     private readonly analyzer: AudioAnalyzer;
@@ -60,7 +70,14 @@ export class TrackLibrary {
         const fresh: CachedTrack[] = [];
         const tracks: AnalyzedTrack[] = [];
 
-        for (const file of files) {
+        // Clear at the start, populate per iteration — that way `tracks()` returns
+        // whatever's been scanned so far instead of nothing-then-everything. The
+        // background-scan state machine in `LibraryService` relies on this.
+        this.tracksByPath.clear();
+        const total: number = files.length;
+
+        for (let i = 0; i < files.length; i++) {
+            const file: string = files[i] as string;
             const stat = await fs.stat(file);
             const mtime: number = stat.mtimeMs;
             const size: number = stat.size;
@@ -71,10 +88,9 @@ export class TrackLibrary {
             if (cached !== undefined && cached.mtime === mtime && cached.size === size) {
                 cacheEntry = cached;
                 result = TrackLibrary.deserialize(cached.result);
+                this.onProgress?.({ current: i + 1, total: total, name: file, phase: 'cache' });
             } else {
-                if (this.onProgress !== undefined) {
-                    this.onProgress(file);
-                }
+                this.onProgress?.({ current: i + 1, total: total, name: file, phase: 'analyse' });
                 result = await this.analyzer.analyze(file);
                 cacheEntry = {
                     path: file,
@@ -84,14 +100,12 @@ export class TrackLibrary {
                 };
             }
             fresh.push(cacheEntry);
-            tracks.push({ path: file, result: result, hasCover: false });
+            const track: AnalyzedTrack = { path: file, result: result, hasCover: false };
+            tracks.push(track);
+            this.tracksByPath.set(track.path, track);
         }
 
         await this.saveCache(fresh);
-        this.tracksByPath.clear();
-        for (const t of tracks) {
-            this.tracksByPath.set(t.path, t);
-        }
         return tracks;
     }
 

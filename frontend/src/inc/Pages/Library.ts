@@ -17,6 +17,7 @@ import {
     type DjSet,
     type LibraryResponse,
     type RouteTrack,
+    type ScanStatus,
     type TransitionPlan,
 } from '@headbangbear/schemas';
 import { CamelotUtil } from '../Util/CamelotUtil.js';
@@ -97,6 +98,12 @@ export class Library extends BasePage {
 
     private unsubscribeSetlist: (() => void) | null = null;
 
+    private $scanBanner: JQuery<HTMLDivElement> | null = null;
+
+    private scanPollHandle: number | null = null;
+
+    private lastRenderedCount: number = 0;
+
     public constructor() {
         super();
         this.setTitle(new LangText('library'));
@@ -115,6 +122,7 @@ export class Library extends BasePage {
             window.removeEventListener('keydown', this.keydownHandler);
             this.keydownHandler = null;
         }
+        this.stopScanPolling();
     }
 
     public override async loadContent(): Promise<void> {
@@ -258,6 +266,22 @@ export class Library extends BasePage {
             this.refreshTransitionButtons();
         });
 
+        // Scan banner — visible only while a background scan is running. Polled every
+        // ~2 s; when the in-flight count changes the track table is refetched so newly
+        // analysed tracks appear without a manual refresh.
+        const bannerRow = new ContentRow(content);
+        const bannerCol = new ContentCol(bannerRow, ContentColSize.col12);
+        this.$scanBanner = jQuery<HTMLDivElement>(`
+            <div class="alert alert-info alert-dismissible fade show hbb-scan-banner" style="display:none;">
+                <h5 class="mb-2"><i class="fas fa-sync-alt fa-spin mr-2"></i>${Library.lang('library_scan_banner_title')}</h5>
+                <p class="mb-2 small hbb-scan-banner-detail"></p>
+                <div class="progress" style="height:6px;">
+                    <div class="progress-bar progress-bar-striped progress-bar-animated bg-info hbb-scan-banner-bar" role="progressbar" style="width:0%"></div>
+                </div>
+            </div>
+        `);
+        bannerCol.getElement().append(this.$scanBanner);
+
         // Track list ---------------------------------------------------------------------------
         const tracksRow = new ContentRow(content);
         const tracksCard = new Card(new ContentCol(tracksRow, ContentColSize.col12));
@@ -290,6 +314,129 @@ export class Library extends BasePage {
 
         tracksCard.hideLoading();
         this.renderTracksTable(tracksCard, library);
+        this.lastRenderedCount = library.tracks.length;
+
+        // Once the table is up, ask the backend whether a scan is still running. If yes,
+        // show the banner and start polling so additional tracks materialise as they're
+        // analysed.
+        await this.kickScanPollingIfBusy();
+    }
+
+    /**
+     * Single shot: read scan status, render banner if a scan is in flight, and start
+     * the polling loop. Idempotent — calling again while polling is active is a no-op.
+     */
+    private async kickScanPollingIfBusy(): Promise<void> {
+        if (this.scanPollHandle !== null) {
+            return;
+        }
+        try {
+            const status = await LibraryApi.scanStatus();
+            this.updateScanBanner(status);
+            if (status.state === 'scanning') {
+                this.startScanPolling();
+            }
+        } catch {
+            // Backend may not have wired the endpoint yet (older builds) — silently
+            // skip rather than block the page.
+        }
+    }
+
+    private startScanPolling(): void {
+        if (this.scanPollHandle !== null) {
+            return;
+        }
+        const tick = (): void => {
+            void (async (): Promise<void> => {
+                let status: ScanStatus;
+                try {
+                    status = await LibraryApi.scanStatus();
+                } catch {
+                    return;
+                }
+                this.updateScanBanner(status);
+                // When the in-flight track count moved past what's currently rendered,
+                // refetch the library list. Cheap server-side; the table re-render is
+                // ~ms even at a thousand rows.
+                if (status.current > this.lastRenderedCount && this.tracksCard !== null) {
+                    try {
+                        const library: LibraryResponse = await LibraryApi.list();
+                        this.renderTracksTable(this.tracksCard, library);
+                        this.lastRenderedCount = library.tracks.length;
+                    } catch {
+                        // ignored — try again next tick
+                    }
+                }
+                if (status.state !== 'scanning') {
+                    this.stopScanPolling();
+                    // One final list refresh after `done` to make sure the last track
+                    // is present (the scan may have finished between two polls).
+                    if (this.tracksCard !== null) {
+                        try {
+                            const library: LibraryResponse = await LibraryApi.list();
+                            this.renderTracksTable(this.tracksCard, library);
+                            this.lastRenderedCount = library.tracks.length;
+                        } catch {
+                            // ignored
+                        }
+                    }
+                }
+            })();
+        };
+        this.scanPollHandle = window.setInterval(tick, 2000);
+    }
+
+    private stopScanPolling(): void {
+        if (this.scanPollHandle !== null) {
+            window.clearInterval(this.scanPollHandle);
+            this.scanPollHandle = null;
+        }
+    }
+
+    private updateScanBanner(status: ScanStatus): void {
+        if (this.$scanBanner === null) {
+            return;
+        }
+        if (status.state === 'idle') {
+            this.$scanBanner.hide();
+            return;
+        }
+        const $detail = this.$scanBanner.find<HTMLParagraphElement>('.hbb-scan-banner-detail');
+        const $bar = this.$scanBanner.find<HTMLDivElement>('.hbb-scan-banner-bar');
+        const $title = this.$scanBanner.find<HTMLHeadingElement>('h5');
+        const $titleIcon = $title.find<HTMLElement>('i');
+        if (status.state === 'scanning') {
+            this.$scanBanner.removeClass('alert-success alert-danger').addClass('alert-info');
+            $titleIcon.removeClass('fa-check-circle fa-exclamation-triangle').addClass('fa-sync-alt fa-spin');
+            $title.contents().last().replaceWith(` ${Library.lang('library_scan_banner_title')}`);
+            const detail: string = `${Library.lang('library_scan_banner_progress')}: `
+                + `${status.current.toString()} / ${status.total.toString()} `
+                + `(${status.librarySource}) — ${status.currentName}`
+                + (status.currentPhase !== undefined ? ` [${status.currentPhase}]` : '');
+            $detail.text(detail);
+            const pct: number = status.total > 0 ? (status.current / status.total) * 100 : 0;
+            $bar.css('width', `${pct.toFixed(1)}%`);
+            this.$scanBanner.show();
+        } else if (status.state === 'done') {
+            this.$scanBanner.removeClass('alert-info alert-danger').addClass('alert-success');
+            $titleIcon.removeClass('fa-sync-alt fa-spin fa-exclamation-triangle').addClass('fa-check-circle');
+            $title.contents().last().replaceWith(` ${Library.lang('library_scan_banner_done')}`);
+            $detail.text(
+                `${status.current.toString()} / ${status.total.toString()} (${status.librarySource})`,
+            );
+            $bar.css('width', '100%');
+            // Auto-hide after a short victory lap.
+            setTimeout((): void => {
+                this.$scanBanner?.fadeOut(300);
+            }, 4000);
+        } else if (status.state === 'error') {
+            this.$scanBanner.removeClass('alert-info alert-success').addClass('alert-danger');
+            $titleIcon.removeClass('fa-sync-alt fa-spin fa-check-circle').addClass('fa-exclamation-triangle');
+            $title.contents().last().replaceWith(` ${Library.lang('library_scan_banner_failed')}`);
+            $detail.text(status.error ?? Library.lang('library_scan_banner_failed'));
+            $bar.css('width', '100%');
+            this.$scanBanner.show();
+        }
     }
 
     private async rescanLibrary($btn: JQuery<HTMLButtonElement>): Promise<void> {

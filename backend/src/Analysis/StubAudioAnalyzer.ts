@@ -1,4 +1,4 @@
-import { AudioAnalyzer } from './AudioAnalyzer.js';
+import { AudioAnalyzer, type AnalyzerInput } from './AudioAnalyzer.js';
 import { Camelot } from './Camelot.js';
 import { OpenKey } from './OpenKey.js';
 import type { AnalysisResult, MusicalKey } from './schemas.js';
@@ -34,7 +34,7 @@ export class StubAudioAnalyzer extends AudioAnalyzer {
         this.drops = drops;
     }
 
-    public override async analyze(_filePath: string): Promise<AnalysisResult> {
+    public override async analyze(_input: AnalyzerInput): Promise<AnalysisResult> {
         const camelot: Camelot = Camelot.fromKey(this.key);
         const openKey: OpenKey = OpenKey.fromCamelot(camelot);
         const beatInterval: number = 60 / this.bpm;

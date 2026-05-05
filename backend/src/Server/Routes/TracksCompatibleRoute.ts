@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { DefaultRoute } from 'figtree';
-import type { AnalyzedTrack, TrackLibrary } from '../../Library/TrackLibrary.js';
+import type { AnalyzedTrack } from '../../Library/TrackLibrary.js';
+import type { LibraryFacade } from '../LibraryService.js';
 import { LibraryRoute } from './LibraryRoute.js';
 import {
     CompatibleQuerySchema,
@@ -14,9 +15,9 @@ import {
  * Camelot-compatible track in the library, sorted by ascending BPM delta.
  */
 export class TracksCompatibleRoute extends DefaultRoute {
-    private readonly library: TrackLibrary;
+    private readonly library: LibraryFacade;
 
-    public constructor(library: TrackLibrary) {
+    public constructor(library: LibraryFacade) {
         super();
         this._uriBase = '/api/';
         this.library = library;

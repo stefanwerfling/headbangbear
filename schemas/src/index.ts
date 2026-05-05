@@ -9,3 +9,4 @@ export * from './Library.js';
 export * from './RouteBodies.js';
 export * from './KeyLabels.js';
 export * from './KeyProfileSweep.js';
+export * from './Settings.js';

@@ -13,5 +13,6 @@ coverage/
 *.tsbuildinfo
 backend/config.json
 backend/logs/
+backend/.hbb-settings.json
 frontend/assets/
 samples/

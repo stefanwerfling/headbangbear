@@ -1,5 +1,7 @@
+import { join } from 'node:path';
 import { BackendApp, ConfigBackend, HttpService } from 'figtree';
 import type { DefaultArgs } from 'figtree-schemas';
+import { SettingsStore } from '../Settings/SettingsStore.js';
 import { applyCspOverride } from './applyCspOverride.js';
 import { LibraryService } from './LibraryService.js';
 import { HbbRouteLoader } from './HbbRouteLoader.js';
@@ -16,6 +18,10 @@ export class HeadbangbearApp extends BackendApp<DefaultArgs, HbbConfig> {
     public constructor() {
         super('headbangbear');
         this.configInstance = HbbConfigBackend.install();
+        // Settings store path is process-cwd relative — typically the backend workspace
+        // dir on `npm run dev`, alongside `config.json`. Keeps the user-edited settings
+        // out of the static figtree config so saving from the UI doesn't rewrite that.
+        SettingsStore.install(join(process.cwd(), '.hbb-settings.json'));
         applyCspOverride();
     }
 

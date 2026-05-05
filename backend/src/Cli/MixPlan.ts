@@ -70,8 +70,12 @@ export class MixPlan {
         const lib: TrackLibrary = new TrackLibrary(
             new EssentiaAudioAnalyzer(),
             cachePath,
-            (file: string): void => {
-                process.stderr.write(`analyzing ${basename(file)}\n`);
+            (event): void => {
+                if (event.phase === 'analyse') {
+                    process.stderr.write(
+                        `[${event.current.toString()}/${event.total.toString()}] analyzing ${basename(event.name)}\n`,
+                    );
+                }
             },
         );
         const cli: MixPlan = new MixPlan(lib);

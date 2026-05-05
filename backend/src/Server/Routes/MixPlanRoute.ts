@@ -1,8 +1,9 @@
 import { Router } from 'express';
 import { DefaultRoute } from 'figtree';
 import type { TransitionStyle } from '@headbangbear/schemas';
-import type { AnalyzedTrack, TrackLibrary } from '../../Library/TrackLibrary.js';
+import type { AnalyzedTrack } from '../../Library/TrackLibrary.js';
 import { MixTransition, type TransitionPlan } from '../../Mix/MixTransition.js';
+import type { LibraryFacade } from '../LibraryService.js';
 import { MixPlanBodySchema, MixPlanResponseSchema } from '../schemas.js';
 
 /**
@@ -10,9 +11,9 @@ import { MixPlanBodySchema, MixPlanResponseSchema } from '../schemas.js';
  * (cue points, mix duration, key match, drop alignment).
  */
 export class MixPlanRoute extends DefaultRoute {
-    private readonly library: TrackLibrary;
+    private readonly library: LibraryFacade;
 
-    public constructor(library: TrackLibrary) {
+    public constructor(library: LibraryFacade) {
         super();
         this._uriBase = '/api/';
         this.library = library;

@@ -1,6 +1,6 @@
 import { Essentia, EssentiaWASM, type EssentiaInstance, type EssentiaVector } from 'essentia.js';
 import { FfmpegDecoder } from '../Audio/FfmpegDecoder.js';
-import { AudioAnalyzer } from './AudioAnalyzer.js';
+import { AudioAnalyzer, type AnalyzerInput } from './AudioAnalyzer.js';
 import { Camelot } from './Camelot.js';
 import { OpenKey } from './OpenKey.js';
 import { DropDetector } from './DropDetector.js';
@@ -60,10 +60,10 @@ export class EssentiaAudioAnalyzer extends AudioAnalyzer {
      * Decode + KeyExtractor only, skipping rhythm/RMS/drops. Used by `KeyProfileSweep`
      * which needs many fast key predictions per track and doesn't care about the rest.
      */
-    public async analyzeKeyOnly(filePath: string): Promise<MusicalKey> {
-        const samples: Float32Array = await this.decoder.decode(filePath);
+    public async analyzeKeyOnly(input: AnalyzerInput): Promise<MusicalKey> {
+        const samples: Float32Array = await this.decoder.decode(input);
         if (samples.length === 0) {
-            throw new Error(`No audio samples decoded from ${filePath}`);
+            throw new Error(`No audio samples decoded from ${EssentiaAudioAnalyzer.describeInput(input)}`);
         }
         const essentia: EssentiaInstance = await this.getEssentia();
         const vector: EssentiaVector = essentia.arrayToVector(samples);
@@ -82,10 +82,10 @@ export class EssentiaAudioAnalyzer extends AudioAnalyzer {
         }
     }
 
-    public override async analyze(filePath: string): Promise<AnalysisResult> {
-        const samples: Float32Array = await this.decoder.decode(filePath);
+    public override async analyze(input: AnalyzerInput): Promise<AnalysisResult> {
+        const samples: Float32Array = await this.decoder.decode(input);
         if (samples.length === 0) {
-            throw new Error(`No audio samples decoded from ${filePath}`);
+            throw new Error(`No audio samples decoded from ${EssentiaAudioAnalyzer.describeInput(input)}`);
         }
         const essentia: EssentiaInstance = await this.getEssentia();
         const vector: EssentiaVector = essentia.arrayToVector(samples);
@@ -174,6 +174,12 @@ export class EssentiaAudioAnalyzer extends AudioAnalyzer {
                 resolve();
             };
         });
+    }
+
+    /** Best-effort label for use in error messages — paths get returned as-is, streams
+     *  collapse to the constant `<stream>` (we don't expose individual Readable details). */
+    private static describeInput(input: AnalyzerInput): string {
+        return typeof input === 'string' ? input : '<stream>';
     }
 
     private static normalizeTonic(raw: string): PitchClass {
