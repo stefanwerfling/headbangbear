@@ -1,0 +1,29 @@
+{
+    "name": "headbangbear",
+    "version": "1.0.0",
+    "private": true,
+    "description": "HBB - head bang bear: music analysis with harmonic mixing",
+    "license": "ISC",
+    "workspaces": [
+        "schemas",
+        "backend",
+        "frontend"
+    ],
+    "scripts": {
+        "build": "npm run build --workspaces",
+        "dev:backend": "npm run dev -w @headbangbear/backend",
+        "dev:frontend": "npm run dev -w @headbangbear/frontend",
+        "typecheck": "npm run typecheck --workspaces",
+        "lint": "eslint .",
+        "format": "prettier --write .",
+        "format:check": "prettier --check .",
+        "test": "npm run test --workspaces --if-present"
+    },
+    "devDependencies": {
+        "@eslint/js": "^9.13.0",
+        "eslint": "^9.13.0",
+        "prettier": "^3.3.3",
+        "typescript": "^5.6.3",
+        "typescript-eslint": "^8.12.2"
+    }
+}
