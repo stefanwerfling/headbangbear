@@ -1,0 +1,15 @@
+{
+    "httpserver": {
+        "port": 3000,
+        "publicdir": "../frontend"
+    },
+    "db": {},
+    "logging": {
+        "enableConsole": true,
+        "level": "info",
+        "dirname": "./logs"
+    },
+    "library": {
+        "rootDir": "/absolute/path/to/your/library"
+    }
+}
