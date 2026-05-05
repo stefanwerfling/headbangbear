@@ -1,0 +1,18 @@
+{
+    "extends": "../tsconfig.base.json",
+    "compilerOptions": {
+        "outDir": "./dist",
+        "rootDir": "./src",
+        "module": "ES2015",
+        "moduleResolution": "Node",
+        "target": "ES2017",
+        "lib": ["ES2022", "DOM", "DOM.Iterable"],
+        "jsx": "preserve",
+        "allowSyntheticDefaultImports": true,
+        "esModuleInterop": true,
+        "downlevelIteration": true,
+        "typeRoots": ["./node_modules/@types", "../node_modules/@types"]
+    },
+    "include": ["src/**/*"],
+    "exclude": ["dist", "node_modules"]
+}

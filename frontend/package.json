@@ -1,0 +1,36 @@
+{
+    "name": "@headbangbear/frontend",
+    "version": "1.0.0",
+    "private": true,
+    "description": "Headbangbear frontend - bambooo / AdminLTE admin UI",
+    "scripts": {
+        "build": "gulp",
+        "build-assets": "gulp copy-data",
+        "build-bundle": "gulp build-webpack",
+        "dev": "gulp watch",
+        "typecheck": "tsc --noEmit",
+        "test": "echo \"frontend: no tests yet\" && exit 0"
+    },
+    "dependencies": {
+        "@fortawesome/fontawesome-free": "^7.2.0",
+        "@headbangbear/schemas": "*",
+        "@popperjs/core": "^2.11.8",
+        "admin-lte": "^3.2.0",
+        "bambooo": "git+https://github.com/stefanwerfling/bambooo.git",
+        "bootstrap": "^5.3.8",
+        "ionicons-css": "^5.2.2",
+        "jquery": "^3.7.1",
+        "vts": "github:OpenSourcePKG/vts",
+        "wavesurfer.js": "^7.12.6"
+    },
+    "devDependencies": {
+        "@types/jquery": "^3.5.32",
+        "@types/node": "^22.9.0",
+        "fork-ts-checker-webpack-plugin": "^9.0.2",
+        "gulp": "^4.0.2",
+        "ts-loader": "^9.5.2",
+        "typescript": "^5.7.3",
+        "webpack": "^5.97.1",
+        "webpack-cli": "^5.1.4"
+    }
+}

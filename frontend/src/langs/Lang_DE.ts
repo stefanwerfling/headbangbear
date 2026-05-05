@@ -1,0 +1,288 @@
+import { LangDefine } from 'bambooo';
+
+export class Lang_DE implements LangDefine {
+
+    private readonly _content: { [index: string]: string } = {
+        title: 'Headbangbear',
+
+        // Sidemenu
+        home: 'Start',
+        library: 'Bibliothek',
+        dj_set: 'DJ-Set',
+        key_labels: 'Key-Labels',
+        key_labels_help_title: 'Wie das funktioniert',
+        key_labels_help_body: 'Wähle für jeden Track die korrekte Tonart aus und speichere. Die Labels landen in <code>&lt;library&gt;/truth.json</code> und werden von <code>npm run key-eval</code> + <code>--sweep</code> ausgewertet, um zu zeigen wie oft der Analyser richtig lag und welches Key-Detection-Profil zu deiner Library passt.',
+        key_labels_predicted: 'Vorhersage',
+        key_labels_truth: 'Korrekt',
+        key_labels_save: 'Labels speichern',
+        key_labels_saving: 'Speichere…',
+        key_labels_saved: 'Gespeichert.',
+        key_labels_save_failed: 'Speichern fehlgeschlagen',
+        key_labels_load_failed: 'Labels laden fehlgeschlagen',
+        key_labels_labelled: 'gelabelt',
+        key_labels_sweep_title: 'Profile-Sweep',
+        key_labels_sweep_help: 'Jedes ausgewählte Key-Detection-Profil läuft gegen deine gespeicherten Labels und wird nach MIREX-Genauigkeit gerankt. <b>Erster Lauf ist langsam</b> (~3 s pro Track pro Profil, danach gecacht) — Folgeläufe sind instant.',
+        key_labels_sweep_run: 'Sweep starten',
+        key_labels_sweep_running: 'Läuft… erster Lauf kann mehrere Minuten dauern.',
+        key_labels_sweep_done: 'Sweep abgeschlossen',
+        key_labels_sweep_failed: 'Sweep fehlgeschlagen',
+        key_labels_sweep_best: 'Bestes Profil',
+        key_labels_sweep_profile: 'Profil',
+        key_labels_sweep_mirex: 'MIREX',
+        key_labels_sweep_matched: 'Erkannt',
+        key_labels_sweep_truth_size: 'Truth-Labels',
+        key_labels_sweep_no_profiles: 'Mindestens ein Profil auswählen.',
+        key_labels_sweep_no_rows: 'Keine Sweep-Ergebnisse.',
+
+        // Common columns / labels
+        tracks: 'Tracks',
+        compatible_tracks: 'Kompatible Tracks',
+        camelot: 'Camelot',
+        open_key: 'Open Key',
+        bpm: 'BPM',
+        energy: 'Energie',
+        drops: 'Drops',
+        duration: 'Dauer',
+        path: 'Pfad',
+        cover: 'Cover',
+        track: 'Track',
+        artist: 'Künstler',
+        album: 'Album',
+        year: 'Jahr',
+        genre: 'Genre',
+        dj_set_now_playing_idle: 'Kein Track aktiv',
+        dj_set_now_playing_index: 'Track',
+        dj_set_avoid_same_artist: 'Künstler nicht doppeln',
+        dj_set_avoid_same_artist_help: 'Beam-Search bestraft aufeinanderfolgende Tracks vom selben Künstler. Länge bleibt dominant — der Filter wirkt nur als Tiebreaker.',
+        bpm_delta: 'BPM Δ',
+        no_track_selected: 'Wähle einen Track, um kompatible Treffer zu sehen.',
+        loading: 'Lade…',
+
+        // Landing page
+        landing_title: 'Willkommen bei Headbangbear',
+        landing_intro: 'Headbangbear (HBB) analysiert deine Musik — Tonart, BPM, Energie, Drops — und hilft dir, harmonische DJ-Sets zu bauen, in denen jeder Übergang musikalisch passt. Du wählst einen Starttrack, HBB findet den nächsten, der in Tonart und Tempo dazu mixt.',
+        home_intro_audio_disable: 'Intro beim nächsten Besuch deaktivieren',
+        home_intro_audio_help: 'Beim Öffnen läuft einmalig ein kurzes Intro-Audio. Häkchen setzen, um es bei künftigen Besuchen stumm zu halten — Auswahl bleibt im localStorage erhalten.',
+        tab_changelog: 'Änderungen',
+        tab_guide: 'Anleitung',
+
+        // Anleitung — Schnellstart
+        guide_quickstart_title: 'Schnellstart',
+        guide_quickstart_step1_title: 'Bibliothek konfigurieren',
+        guide_quickstart_step1: 'Bearbeite <code>backend/config.json</code> und setze <code>library.rootDir</code> auf einen Ordner mit MP3-Dateien. Beim allerersten Start analysiert HBB jeden Track mit essentia.js (Tonart, BPM, Energie, Drops) und cached das Ergebnis. Rechne mit ~3 s pro Track beim Erstscan; folgende Starts laufen direkt aus dem Cache.',
+        guide_quickstart_step2_title: 'Backend + Frontend starten',
+        guide_quickstart_step2: 'Zwei Terminals: <code>npm run dev -w @headbangbear/backend</code> (auto-reloading API-Server) und <code>npm run dev -w @headbangbear/frontend</code> (inkrementelles webpack). Öffne <code>https://localhost:3777</code> — Self-signed-Cert akzeptieren.',
+        guide_quickstart_step3_title: 'Mix in der Bibliothek planen',
+        guide_quickstart_step3: 'Klick auf <b>→ A</b> bei einem Track lädt Deck A, dann <b>→ B</b> bei einem zweiten lädt Deck B. <b>Plan Mix</b> drücken: HBB wählt Cue-Out/Cue-In, snappt auf Bar-Grenzen, bevorzugt Drop-Alignment und meldet den nötigen BPM-Shift. Rote Bereiche markieren die geplanten Cues.',
+        guide_quickstart_step4_title: 'Komplettes Set generieren oder abspielen',
+        guide_quickstart_step4: 'Öffne die <b>DJ-Set</b>-Seite. <b>Generate</b> findet eine Camelot-kompatible Kette durch deine Library; <b>Play</b> streamt sie im Browser mit Crossfades und pro-Track-Pitch. Vorher <b>Set aufnehmen</b> ankreuzen, um den Mix als MP3 runterzuladen.',
+
+        // Anleitung — Bibliotheks-Seite
+        guide_library_title: 'Bibliotheks-Seite',
+        guide_library_decks_title: 'Decks A und B',
+        guide_library_decks: 'Zwei Cards oben mit den Labels Deck A (blau) und Deck B (grün). Jedes zeigt Cover, Künstler/Titel, Camelot/Open-Key/BPM/Energie-Badges des geladenen Tracks, die Wellenform mit Drop-Markern, Beat-Grid und ein orangefarbenes Energie-Kurven-Overlay.',
+        guide_library_plan_title: 'Plan-Mix-Toolbar',
+        guide_library_plan: '<b>Plan Mix A → B</b> rechnet Cue-In/Cue-Out und Pitch-Shift für die geladenen Decks. <b>Play Transition</b> spielt nur den Crossfade-Bereich vor. <b>Add to Setlist</b> speichert den Plan für die DJ-Set-Seite (Manual-Modus).',
+        guide_library_table_title: 'Track-Tabelle',
+        guide_library_table: 'Unter den Decks: Cover-Thumb, Track-Titel (Künstler darunter), Camelot, Open Key, BPM, Energie, Drops-Anzahl und <b>→ A</b>/<b>→ B</b>-Buttons pro Zeile. Klick in eine Zeile lädt Deck A und blendet harmonisch passende Tracks darunter ein.',
+        guide_library_filters_title: 'Filter',
+        guide_library_filters: 'Suchfeld matcht Dateinamen + Künstler + Titel + Album + Genre. <b>Nur kompatible</b> versteckt Tracks, die nicht Camelot-kompatibel zu Deck A sind. BPM-Range, Energie-Range, Year-Range, Genre-Dropdown. Alle Filter persistieren im localStorage.',
+        guide_library_sort_title: 'Sortierbare Spalten',
+        guide_library_sort: 'Klick auf eine Spaltenüberschrift (Track / Camelot / BPM / Energie / Drops) sortiert aufsteigend. Zweiter Klick absteigend, dritter Klick clear. Sortier-Reihenfolge ist nur in-memory — Refresh setzt sie zurück.',
+        guide_library_cues_title: 'Hot Cues',
+        guide_library_cues: '8 nummerierte Slots pro Track. Klick auf leeren Slot setzt ihn am aktuellen Playhead, Klick auf gefüllten springt dorthin, <kbd>Shift</kbd>+Klick löscht. Cues werden pro Track im localStorage gespeichert und als cyanfarbene Marker auf der Wellenform gerendert.',
+        guide_library_loop_title: 'Loop',
+        guide_library_loop: '<b>Loop In</b>/<b>Out</b> markieren einen Bereich; <b>aktiv</b> springt automatisch zurück zu In, sobald der Cursor Out erreicht. Die gelbe Region auf der Wellenform ist verschiebbar (drag) und an den Kanten resizable.',
+        guide_library_eq_title: 'Pro-Deck 3-Band-EQ',
+        guide_library_eq: 'LO/MID/HI-Shelf+Peak-Filter pro Deck (±12 dB). In wavesurfers Audio-Chain via Web Audio BiquadFilterNodes integriert — wirkt nur auf das jeweilige Deck. Reset setzt alle Bänder auf 0 dB.',
+        guide_library_tempo_title: 'Tempo + Pitch-Lock',
+        guide_library_tempo: '<b>Tempo</b>-Slider (0.7×–1.3×) pitcht das Deck. <b>Pitch lock</b> hält die musikalische Tonart beim Tempo-Wechsel (Browser-natives Time-Stretching). Ohne Lock klingt schneller wie höher gepitcht — Plattenspieler-Feel.',
+        guide_library_shortcuts_title: 'Tastatur-Shortcuts',
+        guide_library_shortcuts: '<kbd>Tab</kbd> wechselt das aktive Deck (blauer Rand). <kbd>Space</kbd> Play/Pause. <kbd>1</kbd>–<kbd>8</kbd> triggern Hot-Cues, <kbd>Shift</kbd>+<kbd>1</kbd>..<kbd>8</kbd> löschen. <kbd>Q</kbd>/<kbd>W</kbd> setzen Loop In/Out, <kbd>E</kbd> löscht. Wird beim Tippen in Inputs unterdrückt.',
+        guide_library_setlist_title: 'Setliste',
+        guide_library_setlist: 'Jeder <b>Add to Setlist</b>-Klick hängt den geplanten Übergang an. Der Counter zeigt, wie viele Einträge in der Queue sind. Die DJ-Set-Seite liest diese Liste im <b>Manual</b>-Modus. Bleibt über Refresh erhalten via localStorage.',
+
+        // Anleitung — DJ-Set-Seite
+        guide_djset_title: 'DJ-Set-Seite',
+        guide_djset_source_title: 'Auto vs Manual',
+        guide_djset_source: 'Radio-Buttons oben. <b>Auto</b> generiert eine Kette via Backend-Planner. <b>Manual</b> spielt die Setlist, die du in der Bibliothek zusammengestellt hast — nur wenn jeder Eintrag\'s <i>to</i> mit dem nächsten Eintrag\'s <i>from</i> übereinstimmt (kontinuierliche Kette).',
+        guide_djset_strategy_title: 'Strategie: Greedy vs Beam',
+        guide_djset_strategy: '<b>Greedy</b> wählt den nächsten kompatiblen Track mit kleinster Energie/BPM-Differenz — schnell, aber kann sich in eine Camelot-Sackgasse manövrieren. <b>Beam (Multi-Start)</b> probiert jeden Track als Start und behält die Top-K Teilketten; langsamer, findet aber zuverlässig längere Ketten.',
+        guide_djset_direction_title: 'Energie-Richtung',
+        guide_djset_direction: '<b>Up</b> = Energie steigt (Aufwärm → Peak). <b>Down</b> = Energie fällt (Peak → Cooldown). <b>Either</b> = keine Richtung. Greedy nutzt das als harten Penalty; Beam-Search ignoriert es, sobald eine Energie-Kurve gesetzt ist.',
+        guide_djset_shape_title: 'Energie-Kurve',
+        guide_djset_shape: 'Stärkere Variante der Richtung. <b>Rising</b> (linear), <b>Arc</b> (Aufwärm → Peak → Cooldown), <b>Descending</b>. Beide Planner wählen Tracks, deren Energie der idealen Position auf der Kurve am nächsten kommt. Die kleine SVG-Vorschau zeigt die Kurve.',
+        guide_djset_style_title: 'Übergangs-Stil',
+        guide_djset_style: '<b>Drop-on-Drop</b> (default) richtet A\'s letzten Drop auf B\'s ersten aus. <b>Tail-Out</b> spielt A\'s Drop aus, dann Fade. <b>Early-Cut</b> übergibt vor A\'s Drop, B\'s Drop ist der Climax. <b>Bar-Match</b> ignoriert Drops komplett (nur Bar-Sync).',
+        guide_djset_target_title: 'Zieldauer',
+        guide_djset_target: '<b>Target (min)</b>-Feld (leer = kein Limit). Greedy stoppt das Anhängen, sobald die laufende Schätzung die Zieldauer erreicht. Beam-Search rankt Ketten nach Nähe zum Ziel, überschreibt das übliche "längste Kette gewinnt".',
+        guide_djset_artist_title: 'Künstler nicht doppeln',
+        guide_djset_artist: 'Beam-only-Soft-Penalty gegen zwei Tracks vom selben Künstler hintereinander. Länge und Kurve dominieren weiter den Lex-Score; greift nur als Tiebreaker zwischen gleich guten Ketten.',
+        guide_djset_play_title: 'Play / Now-Playing',
+        guide_djset_play: '<b>Play</b> streamt die Kette via Web Audio API mit Crossfades. Die Chain-Tabelle highlightet die aktuelle Zeile; die Now-Playing-Card zeigt Cover, "Track N / M", Künstler, Titel, Album. Side-A/B-Badges leuchten auf der aktiven EQ-Reihe.',
+        guide_djset_eq_title: 'Master + Side-EQ',
+        guide_djset_eq: 'Master-EQ (post-Crossfade) und Pro-Side-EQ (Side A = gerade Tracks, B = ungerade) — der DJ-Klassiker: Bass auf der auslaufenden Seite während des Crossfades absenken, auf der einlaufenden hochbringen. Alles ±12 dB.',
+        guide_djset_pitchlock_title: 'AutoPlayer Pitch-Lock',
+        guide_djset_pitchlock: '<b>Pitch lock</b> auf dem AutoPlayer hält die musikalische Tonart beim BPM-Matching (Browser-natives Time-Stretching). Aus = Plattenspieler-Feel; an = Profi-DJ-Feel. Toggelbar während der Wiedergabe.',
+        guide_djset_record_title: 'Set-Aufnahme → MP3',
+        guide_djset_record: '<b>Record set</b> aktiviert den MediaRecorder vor <b>Play</b>. Nach Set-Ende wird der WebM/Opus-Blob serverseitig zu MP3 transcodiert (320 kbps mono via ffmpeg/libmp3lame); ein Download-Link mit Größe erscheint.',
+
+        // Anleitung — Key-Labels-Seite
+        guide_keylabels_title: 'Key-Labels-Seite',
+        guide_keylabels_label_title: 'Labeling',
+        guide_keylabels_label: 'Klick auf das Dropdown neben jedem Track und wähl die korrekte Tonart (z.B. <code>A minor</code>). <b>Save</b> schreibt <code>&lt;library&gt;/truth.json</code> — das Format, das die <code>npm run key-eval</code>-CLI eh konsumiert.',
+        guide_keylabels_sweep_title: 'Profile-Sweep',
+        guide_keylabels_sweep: 'Unter der Labels-Tabelle: gewünschte essentia-Profile ankreuzen, <b>Run sweep</b> klicken. Das Backend predicted jeden gelabelten Track mit jedem Profil, scort via MIREX und rankt sie. Erster Lauf langsam (~3 s × Tracks × Profile); danach gecacht.',
+        guide_keylabels_mirex_title: 'MIREX-Score lesen',
+        guide_keylabels_mirex: 'Exact Match = 1.0, Quint daneben = 0.5, Parallele Dur/Moll = 0.3, Parallel = 0.2, alles andere = 0.0. Das Gewinner-Profil (höchster Durchschnitts-MIREX) ist das, das du als <code>profileType</code> der essentia-Analyse setzen solltest.',
+
+        // Glossar (erweitert)
+        guide_glossary_title: 'Glossar',
+        guide_glossary_camelot_title: 'Camelot Wheel',
+        guide_glossary_camelot: 'Eine kreisförmige Nummerierung der 24 Tonarten (12 Dur + 12 Moll), bei der zwei Tonarten <i>harmonisch kompatibel</i> sind, wenn sie auf derselben Nummer stehen, ±1 Nummer entfernt, oder A↔B auf derselben Nummer. Wird von Profi-DJs genutzt, um ohne Dissonanz in der Tonart zu mixen. HBB zeigt zusätzlich die Open-Key-Notation (Mixed-In-Key).',
+        guide_glossary_bpm_title: 'BPM',
+        guide_glossary_bpm: 'Beats pro Minute — das Tempo. HBB gleicht das BPM durch Pitchen des nächsten Tracks an. Bis ~6% hört man kaum etwas; darüber verbiegt sich die Klangfarbe, deshalb bevorzugt der Planner kleine BPM-Sprünge.',
+        guide_glossary_energy_title: 'Energie',
+        guide_glossary_energy: 'Ein Wert 0..1 wie laut / dicht / "intensiv" ein Track im Schnitt ist (RMS-Lautheit über die ganze Datei). Wird genutzt, um eine Setliste so zu sortieren, dass das Set steigt, fällt oder einen Bogen schlägt.',
+        guide_glossary_drops_title: 'Drops',
+        guide_glossary_drops: 'Erkannte Energie-Höhepunkte — die Sekunden-Lautheit muss nach einer ruhigen Phase über einen Schwellwert spitzen. HBB versucht, den letzten Drop des auslaufenden Tracks mit dem ersten Drop des einlaufenden zusammenfallen zu lassen ("Drop-Match"). Heuristik: False Positives auf Klassik, False Negatives auf gleichförmigem EDM.',
+        guide_glossary_shape_title: 'Energie-Kurve',
+        guide_glossary_shape: '<b>Rising</b> — Set startet leise, endet laut (Aufwärm → Peak). <b>Descending</b> — Set startet laut, endet leise (Peak → Cooldown). <b>Arc</b> — leise → laut → leise, die klassische Festival-Mainstage-Kurve. Überschreibt die einfachere "Energie-Richtung", wenn gesetzt.',
+        guide_glossary_pitch_title: 'Pitch-Shift',
+        guide_glossary_pitch: 'Prozentwert, um den der nächste Track schneller (+) oder langsamer (−) abgespielt wird, damit das BPM zum vorherigen passt. HBB zeigt diesen Wert pro Übergang; hörbarer Nebeneffekt (ohne Pitch-Lock) ist eine kleine Tonart-Verschiebung.',
+        guide_glossary_pitchlock_title: 'Pitch-Lock / Master-Tempo',
+        guide_glossary_pitchlock: 'Browser-Feature, das Wiedergabegeschwindigkeit und Tonhöhe entkoppelt (HTMLMediaElement.preservesPitch). HBB kann damit BPMs angleichen, ohne die musikalische Tonart zu verschieben — was Profi-DJ-Software macht. HBB exposed den Toggle pro Deck und auf dem AutoPlayer.',
+        guide_glossary_transitions_title: 'Übergangs-Stile',
+        guide_glossary_transitions: 'Vier Mix-Muster — <b>Drop-on-Drop</b> richtet die energetischsten Momente aus; <b>Tail-Out</b> spielt den auslaufenden Drop aus und faded dann; <b>Early-Cut</b> übergibt vor dem auslaufenden Drop, sodass der einlaufende Drop der Climax ist; <b>Bar-Match</b> ignoriert Drops komplett.',
+        guide_glossary_beam_title: 'Beam-Search',
+        guide_glossary_beam: 'Such-Algorithmus, der pro Schritt die K besten Teilketten behält statt einer (Greedy). Multi-Start probiert jeden Track als Startpunkt und behält das lex-beste Ergebnis. Findet Ketten, die Greedy nicht findet — Camelot-Sackgassen, verzweigte Graphen, Zieldauer-Constraints.',
+        guide_glossary_mirex_title: 'MIREX',
+        guide_glossary_mirex: 'Music Information Retrieval Evaluation eXchange — der akademische Benchmark für Key-Detection-Algorithmen. HBB scort seinen Key-Detector gegen deine handgelabelten Truth-Daten mit MIREX-Gewichtung, sodass du das essentia-Profil wählen kannst, das zu deiner Library passt.',
+        guide_glossary_metadata_title: 'Metadaten + Cover-Art',
+        guide_glossary_metadata: 'Künstler / Titel / Album / Jahr / Genre + Cover-Art werden aus eingebetteten ID3-Tags (oder Vorbis/MP4-Atoms) via <code>music-metadata</code> gelesen. Kein Netzwerk. Cover-Bytes werden unter <code>&lt;library&gt;/.covers/&lt;sha1&gt;.&lt;ext&gt;</code> gecacht und über <code>/api/v1/library/cover</code> ausgeliefert.',
+
+        // Tipps
+        guide_tips_title: 'Tipps',
+        guide_tips_search_title: 'Such-Box matcht Metadaten, nicht nur Dateinamen',
+        guide_tips_search: 'Die Suchbox in der Bibliothek matcht Dateiname + Künstler + Titel + Album + Genre — alles, was der Metadata-Enricher aus den ID3-Tags gezogen hat. Lowercase-Substring-Match.',
+        guide_tips_persistence_title: 'Vieles bleibt erhalten',
+        guide_tips_persistence: 'Filter, Übergangs-Stil, Pitch-Lock, Hot-Cues, Loops, Setliste, Sprache — alles via localStorage persistiert. Browser-Site-Daten löschen, um alles auf Default zu setzen.',
+        guide_tips_recording_title: 'Aufnahme nimmt alles auf',
+        guide_tips_recording: 'Die Aufnahme greift den Master-Output ab — post-EQ, post-Crossfade. Was du hörst, ist was du bekommst. MediaRecorder produziert WebM/Opus; <code>/api/v1/transcode</code> pipelined das durch ffmpeg → libmp3lame zu 320-kbps-MP3.',
+        guide_tips_active_deck_title: 'Aktives Deck für Shortcuts',
+        guide_tips_active_deck: 'In der Bibliothek auf ein Deck klicken (oder <kbd>Tab</kbd>) macht es <b>aktiv</b> (blauer Rand). Hot-Cue / Loop / Play-Pause-Shortcuts wirken auf das aktive Deck. Default ist Deck A.',
+        guide_tips_lang_title: 'Sprach-Switch',
+        guide_tips_lang: 'Flag-Buttons oben rechts (🇺🇸 EN / 🇩🇪 DE) wechseln die Sprache. Die Auswahl bleibt im localStorage erhalten; die aktuelle Page rendert sich neu, damit dynamisch erzeugte Strings die neue Sprache übernehmen.',
+
+        // DJ-Set page
+        dj_set_help_title: 'Wie das funktioniert',
+        dj_set_help_body: 'Wähle eine Strategie (Greedy = schnell, Beam = langsamer aber findet längere Ketten), eine Energie-Richtung oder eine genauere Energie-Kurve, optional eine Ziel-Dauer, und klicke <b>Generate</b>. HBB liefert eine Camelot-kompatible Kette durch deine Bibliothek. Mit <b>Play</b> hörst du sie im Browser mit Crossfades und Pitch-Matching.',
+        dj_set_source_label: 'Quelle:',
+        dj_set_strategy: 'Strategie',
+        dj_set_direction: 'Energie-Richtung',
+        dj_set_shape: 'Energie-Kurve',
+        dj_set_shape_help: 'Überschreibt Richtung, wenn gesetzt. Rising = Anstieg, Arc = Aufwärm→Peak→Cooldown, Descending = Auslauf.',
+        dj_set_beam_width: 'Beam-Breite',
+        dj_set_target: 'Zieldauer (min)',
+        dj_set_generate: 'Erzeugen',
+        dj_set_play: 'Play',
+        dj_set_stop: 'Stop',
+        dj_set_record: 'Set aufnehmen',
+        dj_set_master_eq_reset: 'Master-EQ Reset',
+        dj_set_source_auto: 'Automatisch',
+        dj_set_source_manual: 'Manuelle Setliste',
+        dj_set_load_setlist: 'Setliste laden',
+        dj_set_clear_setlist: 'Setliste leeren',
+        dj_set_reset_a: 'A zurücksetzen',
+        dj_set_reset_b: 'B zurücksetzen',
+        dj_set_click_generate: 'Klicke <b>Erzeugen</b>, um ein Set zu planen.',
+        dj_set_setlist_empty: 'Setliste ist leer. Füge zuerst Übergänge in der Bibliothek hinzu.',
+        dj_set_setlist_discontinuous: 'Setliste ist nicht zusammenhängend (Eintrag[i].to ≠ Eintrag[i+1].from). Korrigiere in der Bibliothek.',
+        dj_set_manual_not_playable: 'Manuelle Setliste — noch nicht abspielbar.',
+        dj_set_status_generating: 'Erzeuge…',
+        dj_set_status_loading_audio: 'Lade Audio-Puffer…',
+        dj_set_status_stopped: 'Gestoppt.',
+        dj_set_status_finished: 'Set beendet.',
+        dj_set_status_empty: 'Leeres Set.',
+        dj_set_status_set_with: 'Set mit',
+        dj_set_status_tracks: 'Tracks',
+        dj_set_status_transitions: 'Übergänge',
+        dj_set_status_skipped: 'übersprungen',
+        dj_set_status_now_playing: '▶ Spielt jetzt',
+        dj_set_status_generate_failed: 'Erzeugen fehlgeschlagen',
+        dj_set_status_playback_failed: 'Wiedergabe fehlgeschlagen',
+        dj_set_recording_armed: 'scharf (nimmt beim nächsten Play auf)',
+        dj_set_recording_active: '● aufnahme',
+        dj_set_recording_transcoding: '⟳ transkodiere zu MP3…',
+        dj_set_recording_transcode_failed: 'MP3-Transcode fehlgeschlagen',
+        dj_set_pitch_lock: 'Pitch-Lock (Tonart-Sperre)',
+        dj_set_pitch_lock_help: 'Tonhöhe bleibt beim BPM-Match erhalten — Browser-natives Time-Stretch.',
+        dj_set_remove_transition: 'Diesen Übergang entfernen',
+        dj_set_manual_setlist: 'Manuelle Setliste',
+
+        // Transition style
+        transition_style_label: 'Übergangsstil',
+        transition_style_drop_on_drop: 'Drop auf Drop (Climax)',
+        transition_style_tail_out: 'Auslaufen (A-Drop spielt aus, dann Fade)',
+        transition_style_early_cut: 'Früh schneiden (B-Drop ist der Climax)',
+        transition_style_bar_match: 'Bar-Match (Drops ignorieren)',
+
+        // Chain table headers
+        chain_index: '#',
+        chain_track: 'Track',
+        chain_pitch: '→ Pitch',
+        chain_keymatch: '→ Tonart-Match',
+        chain_alignment: '→ Ausrichtung',
+        chain_bars: '→ Takte',
+
+        // Library page
+        library_help_title: 'Wie das funktioniert',
+        library_help_body: 'Klicke einen Track, um ihn in Deck A zu laden — kompatible Kandidaten werden hervorgehoben. <b>→ A</b>/<b>→ B</b> lädt die Decks und <b>Plan Mix</b> berechnet die Cue-Punkte. Geplante Übergänge mit <b>+</b> in die Setliste übernehmen — die DJ-Set-Seite spielt sie im Modus <i>Manuell</i> ab.',
+        library_plan_mix: 'Mix planen A → B',
+        library_play_transition: 'Übergang abspielen',
+        library_add_setlist: 'Zu Setliste',
+        library_clear_cues: 'Cues löschen',
+        library_setlist_label: 'Setliste',
+        library_setlist_entries: 'Einträge',
+        library_filter_placeholder: 'Tracks nach Dateiname filtern…',
+        library_compatible_with: 'Kompatibel mit',
+        library_clear_filters: 'Filter zurücksetzen',
+        library_genre_any: 'beliebig',
+        library_compatible_only: 'Nur kompatible',
+        library_search: 'Suche',
+        library_rescan: 'Bibliothek neu scannen',
+        library_load_failed: 'Bibliothek konnte nicht geladen werden',
+        library_rescan_failed: 'Neuscannen fehlgeschlagen',
+        library_deck_a: 'Deck A',
+        library_deck_b: 'Deck B',
+
+        // Energy-curve chart on DJ-Set page
+        chart_title: 'Energie-Verlauf',
+        chart_actual: 'Tatsächlich',
+        chart_ideal: 'Soll-Kurve',
+
+        // Help-tooltip openers
+        help: 'Hilfe'
+    };
+
+    public getClassName(): string {
+        return 'Lang_DE';
+    }
+
+    public getLangCode(): string {
+        return 'de';
+    }
+
+    public getLangTitle(): string {
+        return 'Deutsch';
+    }
+
+    public getCountryCode(): string {
+        return 'de';
+    }
+
+    public l(content: string): string | null {
+        return this._content[content] ?? null;
+    }
+
+}
