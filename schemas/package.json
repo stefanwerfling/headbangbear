@@ -1,0 +1,26 @@
+{
+    "name": "@headbangbear/schemas",
+    "version": "1.0.0",
+    "private": true,
+    "description": "Shared vts schemas + types between @headbangbear/backend and @headbangbear/frontend",
+    "type": "module",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js"
+        }
+    },
+    "scripts": {
+        "build": "tsc",
+        "typecheck": "tsc --noEmit",
+        "test": "echo \"schemas: no tests yet\" && exit 0"
+    },
+    "dependencies": {
+        "vts": "github:OpenSourcePKG/vts"
+    },
+    "devDependencies": {
+        "typescript": "^5.7.3"
+    }
+}
