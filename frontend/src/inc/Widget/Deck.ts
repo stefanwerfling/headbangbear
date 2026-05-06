@@ -469,25 +469,25 @@ export class Deck {
             if (slot < 0) {
                 return;
             }
-            const path: string | undefined = this.currentTrack?.path;
-            if (path === undefined || this.wavesurfer === null) {
+            const key: string | undefined = Deck.hotCueKeyOf(this.currentTrack);
+            if (key === undefined || this.wavesurfer === null) {
                 return;
             }
             const store: HotCueStore = HotCueStore.getInstance();
-            const cues: readonly (number | null)[] = store.get(path);
+            const cues: readonly (number | null)[] = store.get(key);
             const existing: number | null = cues[slot] ?? null;
             const shiftPressed: boolean =
                 e.shiftKey === true || (e.originalEvent as MouseEvent | undefined)?.shiftKey === true;
             if (shiftPressed) {
                 if (existing !== null) {
-                    store.set(path, slot, null);
+                    store.set(key, slot, null);
                     this.refreshHotCueUi();
                 }
                 return;
             }
             if (existing === null) {
                 const now: number = this.wavesurfer.getCurrentTime();
-                store.set(path, slot, now);
+                store.set(key, slot, now);
                 this.refreshHotCueUi();
             } else {
                 this.wavesurfer.setTime(existing);
@@ -499,11 +499,11 @@ export class Deck {
         if (this.$hotcueRow === null || this.regions === null) {
             return;
         }
-        const path: string | undefined = this.currentTrack?.path;
-        if (path === undefined) {
+        const key: string | undefined = Deck.hotCueKeyOf(this.currentTrack);
+        if (key === undefined) {
             return;
         }
-        const cues: readonly (number | null)[] = HotCueStore.getInstance().get(path);
+        const cues: readonly (number | null)[] = HotCueStore.getInstance().get(key);
 
         // Re-render buttons (filled vs empty visual state).
         this.$hotcueRow.find<HTMLButtonElement>('.hbb-hotcue-btn').each((idx, btn): void => {
@@ -711,26 +711,36 @@ export class Deck {
         if (slot < 0 || slot >= HOTCUE_SLOT_COUNT) {
             return;
         }
-        const path: string | undefined = this.currentTrack?.path;
-        if (path === undefined || this.wavesurfer === null) {
+        const key: string | undefined = Deck.hotCueKeyOf(this.currentTrack);
+        if (key === undefined || this.wavesurfer === null) {
             return;
         }
         const store: HotCueStore = HotCueStore.getInstance();
-        const cues: readonly (number | null)[] = store.get(path);
+        const cues: readonly (number | null)[] = store.get(key);
         const existing: number | null = cues[slot] ?? null;
         if (shift) {
             if (existing !== null) {
-                store.set(path, slot, null);
+                store.set(key, slot, null);
                 this.refreshHotCueUi();
             }
             return;
         }
         if (existing === null) {
-            store.set(path, slot, this.wavesurfer.getCurrentTime());
+            store.set(key, slot, this.wavesurfer.getCurrentTime());
             this.refreshHotCueUi();
         } else {
             this.wavesurfer.setTime(existing);
         }
+    }
+
+    /** Composite hot-cue key combining `providerId` and `path`. Both are user-controlled
+     *  strings, so a delimiter that's invalid in either is safest — `|` works because
+     *  provider ids are validated as identifiers and relative paths use `/`. */
+    private static hotCueKeyOf(track: RouteTrack | null): string | undefined {
+        if (track === null) {
+            return undefined;
+        }
+        return `${track.providerId}|${track.path}`;
     }
 
     public triggerLoopIn(): void {
@@ -818,7 +828,7 @@ export class Deck {
             barGap: 1,
             barRadius: 1,
             normalize: true,
-            url: `api/v1/library/audio?path=${encodeURIComponent(track.path)}`,
+            url: `api/v1/library/audio?providerId=${encodeURIComponent(track.providerId)}&path=${encodeURIComponent(track.path)}`,
             plugins: [regions, timeline, hover]
         });
         ws.on('ready', (): void => {

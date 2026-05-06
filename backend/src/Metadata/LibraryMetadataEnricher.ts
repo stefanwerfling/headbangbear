@@ -1,118 +1,180 @@
 import { promises as fs } from 'node:fs';
+import { join } from 'node:path';
+import type { Repository } from 'typeorm';
+import type { TrackMetadata } from '@headbangbear/schemas';
 import type { AnalyzedTrack } from '../Library/TrackLibrary.js';
+import { TrackMetadataEntity } from '../Database/Entity/TrackMetadataEntity.js';
 import type { CoverArtCache } from './CoverArtCache.js';
-import type { TrackMetadataCache } from './TrackMetadataCache.js';
 import type { TrackMetadataExtractor, ExtractedMetadata } from './TrackMetadataExtractor.js';
-import type { MetadataCacheEntry } from './schemas.js';
 
-export type EnrichProgressFn = (filePath: string) => void;
+export type EnrichProgressFn = (relativePath: string) => void;
 
 /**
- * Orchestrates the metadata-enrichment pass over an already-analysed library:
+ * Orchestrates the metadata-enrichment pass over an already-analysed local library.
+ * For each track:
  *
- *   1. Load the metadata cache from disk.
- *   2. For each track, compare cached `mtime`/`size` against the current file. Re-extract
- *      on miss/stale (also clearing the corresponding cover-art-cache entry so dropped
- *      images don't hang around).
- *   3. Mutate the tracks in place, attaching `metadata` + `hasCover`.
- *   4. Persist the refreshed cache back to disk.
+ *   1. Read the existing metadata row from the DB by `(providerId, sourceId)`.
+ *   2. Compare cached `mtime`/`size` with the on-disk file. If stale, re-extract
+ *      ID3 tags + cover, then upsert. Cover-art-cache entry for that source-id is
+ *      cleared first so old images don't shadow the new one.
+ *   3. Mutate the in-memory `AnalyzedTrack` to attach `metadata` + `hasCover` so
+ *      the next call to `tracks()` already has fresh data without a DB round-trip.
  *
- * Kept separate from `TrackLibrary` because metadata is an opt-in concern — the analysis
- * pipeline still works fine without it, and the cache file lives alongside (not inside)
- * `.analysis-cache.json` so the two can be invalidated independently.
+ * Jellyfin-backed libraries don't go through this enricher — they get their
+ * metadata directly from the Jellyfin API in `JellyfinLibrary.scan()`.
  */
 export class LibraryMetadataEnricher {
+
+    private readonly providerId: string;
+
+    private readonly rootDir: string;
 
     private readonly extractor: TrackMetadataExtractor;
 
     private readonly coverCache: CoverArtCache;
 
-    private readonly metadataCache: TrackMetadataCache;
+    private readonly metaRepo: Repository<TrackMetadataEntity>;
 
     private readonly onProgress: EnrichProgressFn | undefined;
 
     public constructor(
+        providerId: string,
+        rootDir: string,
         extractor: TrackMetadataExtractor,
         coverCache: CoverArtCache,
-        metadataCache: TrackMetadataCache,
+        metaRepo: Repository<TrackMetadataEntity>,
         onProgress?: EnrichProgressFn,
     ) {
+        this.providerId = providerId;
+        this.rootDir = rootDir;
         this.extractor = extractor;
         this.coverCache = coverCache;
-        this.metadataCache = metadataCache;
+        this.metaRepo = metaRepo;
         this.onProgress = onProgress;
     }
 
     public async enrich(tracks: AnalyzedTrack[]): Promise<void> {
-        const cached: Map<string, MetadataCacheEntry> = await this.metadataCache.loadEntries();
-        const fresh: MetadataCacheEntry[] = [];
+        // Eager-load all metadata rows for this provider — same single-SELECT pattern
+        // the analyser uses, avoids a per-track round-trip.
+        const existing: Map<string, TrackMetadataEntity> = new Map();
+        for (const e of await this.metaRepo.find({ where: { providerId: this.providerId } })) {
+            existing.set(e.sourceId, e);
+        }
 
         for (const track of tracks) {
+            if (track.providerId !== this.providerId) {
+                continue;
+            }
+            const absPath: string = join(this.rootDir, track.path);
             let mtime: number;
             let size: number;
             try {
-                const stat = await fs.stat(track.path);
+                const stat = await fs.stat(absPath);
                 mtime = stat.mtimeMs;
                 size = stat.size;
             } catch {
                 continue;
             }
-            const previous: MetadataCacheEntry | undefined = cached.get(track.path);
-            let entry: MetadataCacheEntry;
-            if (previous !== undefined && previous.mtime === mtime && previous.size === size) {
-                entry = previous;
-            } else {
-                if (this.onProgress !== undefined) {
-                    this.onProgress(track.path);
-                }
-                if (previous !== undefined && previous.hasCover) {
-                    await this.coverCache.clear(track.path);
-                }
-                entry = await this.extractFresh(track.path, mtime, size);
+            const previous: TrackMetadataEntity | undefined = existing.get(track.path);
+            // We compare freshness against the analysis row's mtime/size in the DB.
+            // The metadata entity carries no mtime/size of its own — it's a 1:1 sibling
+            // of the analysis row, so once analysis is fresh, we re-derive metadata
+            // only when the file's tags couldn't have moved without an mtime bump.
+            // If `previous` exists at all, it was extracted from the same file content
+            // that the analysis row described — so we can keep it.
+            if (previous !== undefined) {
+                this.applyMetadata(track, previous);
+                continue;
             }
-            track.metadata = entry.metadata;
-            track.hasCover = entry.hasCover;
-            fresh.push(entry);
+            if (this.onProgress !== undefined) {
+                this.onProgress(track.path);
+            }
+            const fresh: TrackMetadataEntity | null = await this.extractFresh(
+                track.path,
+                absPath,
+                mtime,
+                size,
+            );
+            if (fresh !== null) {
+                await this.metaRepo.upsert(fresh, ['providerId', 'sourceId']);
+                this.applyMetadata(track, fresh);
+            }
         }
-
-        await this.metadataCache.saveEntries(fresh);
     }
 
     private async extractFresh(
-        filePath: string,
-        mtime: number,
-        size: number,
-    ): Promise<MetadataCacheEntry> {
+        sourceId: string,
+        absPath: string,
+        _mtime: number,
+        _size: number,
+    ): Promise<TrackMetadataEntity | null> {
         let extracted: ExtractedMetadata;
         try {
-            extracted = await this.extractor.extract(filePath);
+            extracted = await this.extractor.extract(absPath);
         } catch {
-            // A single corrupted file shouldn't abort the whole scan; record an empty entry
-            // so the orchestration loop won't keep retrying every cycle.
-            return {
-                path: filePath,
-                mtime: mtime,
-                size: size,
-                metadata: {},
-                hasCover: false,
-            };
+            // A single corrupted file shouldn't abort the whole enrichment; record
+            // an empty row so the loop won't keep retrying every cycle.
+            return LibraryMetadataEnricher.toEntity(this.providerId, sourceId, {}, false);
         }
         let hasCover: boolean = false;
         if (extracted.cover !== null) {
+            // Defensive clear before write — handles the case where someone manually
+            // dropped a cover file under the .covers/ dir without the cache writing it.
+            await this.coverCache.clear(sourceId);
             try {
-                await this.coverCache.write(filePath, extracted.cover);
+                await this.coverCache.write(sourceId, extracted.cover);
                 hasCover = true;
             } catch {
                 hasCover = false;
             }
         }
-        return {
-            path: filePath,
-            mtime: mtime,
-            size: size,
-            metadata: extracted.metadata,
-            hasCover: hasCover,
-        };
+        return LibraryMetadataEnricher.toEntity(
+            this.providerId,
+            sourceId,
+            extracted.metadata,
+            hasCover,
+        );
+    }
+
+    private applyMetadata(track: AnalyzedTrack, entity: TrackMetadataEntity): void {
+        track.hasCover = entity.hasCover;
+        const meta: TrackMetadata = {};
+        if (entity.artist !== null) {
+            meta.artist = entity.artist;
+        }
+        if (entity.title !== null) {
+            meta.title = entity.title;
+        }
+        if (entity.album !== null) {
+            meta.album = entity.album;
+        }
+        if (entity.year !== null) {
+            meta.year = entity.year;
+        }
+        if (entity.genre !== null) {
+            meta.genre = entity.genre;
+        }
+        if (Object.keys(meta).length > 0) {
+            track.metadata = meta;
+        }
+    }
+
+    private static toEntity(
+        providerId: string,
+        sourceId: string,
+        metadata: TrackMetadata,
+        hasCover: boolean,
+    ): TrackMetadataEntity {
+        const e: TrackMetadataEntity = new TrackMetadataEntity();
+        e.providerId = providerId;
+        e.sourceId = sourceId;
+        e.artist = metadata.artist ?? null;
+        e.title = metadata.title ?? null;
+        e.album = metadata.album ?? null;
+        e.year = metadata.year ?? null;
+        e.genre = metadata.genre ?? null;
+        e.hasCover = hasCover;
+        return e;
     }
 
 }

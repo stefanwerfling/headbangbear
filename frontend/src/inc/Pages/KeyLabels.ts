@@ -1,13 +1,16 @@
-import { Card, ColumnContent, ContentCol, ContentColSize, ContentRow, Lang, LangText, Table, Td, Th, Tr } from 'bambooo';
+import { Card, ColumnContent, ContentCol, ContentColSize, ContentRow, Lang, LangText, Table, Th, Tr } from 'bambooo';
 import type {
     KeyLabelEntry,
     KeyProfileSweepReport,
     KeyProfileSweepRow,
+    LibraryProvider,
+    LocalLibraryProvider,
     RouteTrack,
 } from '@headbangbear/schemas';
 import { KeyLabelsApi } from '../Api/KeyLabelsApi.js';
 import { KeyProfileSweepApi } from '../Api/KeyProfileSweepApi.js';
 import { LibraryApi } from '../Api/LibraryApi.js';
+import { SettingsApi } from '../Api/SettingsApi.js';
 import { TrackDisplayUtil } from '../Util/TrackDisplayUtil.js';
 import { BasePage } from './BasePage.js';
 
@@ -25,13 +28,15 @@ const SWEEP_PROFILES: readonly string[] = [
 ];
 
 /**
- * Ground-truth labelling page. Lets the user assign a canonical key to each track in the
- * library, persists them to `<library>/truth.json` via `POST /api/v1/library/key-labels`,
- * and surfaces a "labelled / total" counter so it's obvious how much work is left.
+ * Ground-truth labelling page. Lets the user assign a canonical key to each track in a
+ * **single local provider**, persists them via `POST /api/v1/library/key-labels` (which
+ * writes `<rootDir>/truth.json` for that provider), and surfaces a "labelled / total"
+ * counter so it's obvious how much work is left.
  *
- * The labelled file is the input the existing `KeyEval` / `KeyProfileSweep` CLIs already
- * consume — this page is the missing UI piece that turns that infra from "edit a JSON
- * file by hand" into something usable.
+ * Iter 52 added multi-provider support — Jellyfin tracks aren't labelable (no on-disk
+ * audio for offline re-extraction) so the page scopes itself to the first `local`-kind
+ * provider in the user's settings. When no local provider exists the page renders an
+ * explanatory empty state instead.
  */
 export class KeyLabels extends BasePage {
 
@@ -53,9 +58,16 @@ export class KeyLabels extends BasePage {
 
     private $sweepResult: JQuery<HTMLDivElement> | null = null;
 
+    private $emptyState: JQuery<HTMLDivElement> | null = null;
+
+    private $providerLabel: JQuery<HTMLSpanElement> | null = null;
+
     private tracks: RouteTrack[] = [];
 
+    /** key = per-provider relative path, value = chosen key string ("A minor" etc.). */
     private labels: Map<string, string> = new Map();
+
+    private activeProviderId: string | null = null;
 
     public constructor() {
         super();
@@ -89,17 +101,29 @@ export class KeyLabels extends BasePage {
         card.setTitle(new LangText('key_labels'));
 
         const $body = card.getBodyElement();
+
+        // Empty state — shown only when no local provider exists in settings. Mutually
+        // exclusive with the labels controls + table.
+        this.$emptyState = jQuery<HTMLDivElement>(`
+            <div class="alert alert-warning m-3" style="display:none;">
+                <i class="fas fa-exclamation-triangle mr-2"></i>${KeyLabels.lang('key_labels_no_local_provider')}
+            </div>
+        `);
+        $body.append(this.$emptyState);
+
         const $controls = jQuery<HTMLDivElement>(`
             <div class="px-3 pt-2 pb-1 d-flex align-items-center" style="gap:1rem;">
                 <button type="button" class="btn btn-sm btn-primary hbb-save-labels">
                     <i class="fas fa-save mr-1"></i>${KeyLabels.lang('key_labels_save')}
                 </button>
                 <span class="hbb-labels-counter text-muted small"></span>
+                <span class="hbb-provider-label badge badge-secondary"></span>
                 <span class="hbb-labels-status text-muted small ml-auto"></span>
             </div>
         `);
         $body.append($controls);
         this.$counter = $controls.find<HTMLSpanElement>('.hbb-labels-counter');
+        this.$providerLabel = $controls.find<HTMLSpanElement>('.hbb-provider-label');
         this.$statusEl = $controls.find<HTMLSpanElement>('.hbb-labels-status');
         this.$saveBtn = $controls.find<HTMLButtonElement>('.hbb-save-labels');
         this.$saveBtn.on('click', (): void => {
@@ -166,6 +190,10 @@ export class KeyLabels extends BasePage {
         if (this.$sweepRunBtn === null || this.$sweepStatus === null || this.$sweepResult === null) {
             return;
         }
+        if (this.activeProviderId === null) {
+            this.$sweepStatus.html(`<span class="text-warning">${KeyLabels.lang('key_labels_no_local_provider')}</span>`);
+            return;
+        }
         const $checks = this.$sweepCard?.find<HTMLInputElement>('.hbb-sweep-profile') ?? jQuery<HTMLInputElement>();
         const profiles: string[] = [];
         $checks.each((_i, el): void => {
@@ -188,7 +216,10 @@ export class KeyLabels extends BasePage {
         this.$sweepResult.empty();
         let report: KeyProfileSweepReport;
         try {
-            report = await KeyProfileSweepApi.run({ profiles: profiles });
+            report = await KeyProfileSweepApi.run({
+                providerId: this.activeProviderId,
+                profiles: profiles,
+            });
         } catch (err) {
             this.$sweepStatus.html(
                 `<span class="text-danger">${KeyLabels.lang('key_labels_sweep_failed')}: ${
@@ -248,15 +279,41 @@ export class KeyLabels extends BasePage {
         if (this.$tbody === null) {
             return;
         }
+        let providerId: string | null;
+        try {
+            providerId = await KeyLabels.resolveLocalProviderId();
+        } catch (err) {
+            this.$statusEl?.html(
+                `<span class="text-danger">${KeyLabels.lang('key_labels_load_failed')}: ${
+                    err instanceof Error ? err.message : String(err)
+                }</span>`,
+            );
+            return;
+        }
+        this.activeProviderId = providerId;
+        if (providerId === null) {
+            this.$emptyState?.show();
+            this.$tbody.empty();
+            this.$counter?.text('');
+            this.$providerLabel?.text('').hide();
+            this.$saveBtn?.prop('disabled', true);
+            this.$sweepRunBtn?.prop('disabled', true);
+            return;
+        }
+        this.$emptyState?.hide();
+        this.$saveBtn?.prop('disabled', false);
+        this.$sweepRunBtn?.prop('disabled', false);
+        this.$providerLabel?.text(providerId).show();
+
         try {
             const [lib, labels] = await Promise.all([
                 LibraryApi.list(),
-                KeyLabelsApi.list(),
+                KeyLabelsApi.list(providerId),
             ]);
-            this.tracks = lib.tracks;
+            this.tracks = lib.tracks.filter((t): boolean => t.providerId === providerId);
             this.labels.clear();
             for (const entry of labels.labels) {
-                this.labels.set(entry.filename, entry.key);
+                this.labels.set(entry.path, entry.key);
             }
         } catch (err) {
             this.$statusEl?.html(
@@ -278,10 +335,11 @@ export class KeyLabels extends BasePage {
         for (const track of this.tracks) {
             const filename: string = TrackDisplayUtil.filenameOf(track.path);
             const predicted: string = KeyLabels.formatPredicted(track);
-            const current: string = this.labels.get(filename) ?? '';
+            const current: string = this.labels.get(track.path) ?? '';
             const optionsHtml: string = KeyLabels.buildOptionsHtml(current);
+            const trackPath: string = track.path;
             const $row = jQuery<HTMLTableRowElement>(`
-                <tr data-filename="${TrackDisplayUtil.escape(filename)}">
+                <tr data-path="${TrackDisplayUtil.escape(trackPath)}">
                     <td>${TrackDisplayUtil.coverThumbHtml(track)}</td>
                     <td>${TrackDisplayUtil.trackCellHtml(track, filename)}</td>
                     <td><span class="badge badge-info">${track.camelot}</span> <small class="text-muted ml-1">${TrackDisplayUtil.escape(predicted)}</small></td>
@@ -295,9 +353,9 @@ export class KeyLabels extends BasePage {
             $row.find<HTMLSelectElement>('.hbb-truth-select').on('change', (e): void => {
                 const value: string = jQuery(e.currentTarget).val()?.toString() ?? '';
                 if (value === '') {
-                    this.labels.delete(filename);
+                    this.labels.delete(trackPath);
                 } else {
-                    this.labels.set(filename, value);
+                    this.labels.set(trackPath, value);
                 }
                 this.refreshCounter();
             });
@@ -306,17 +364,18 @@ export class KeyLabels extends BasePage {
     }
 
     private async save(): Promise<void> {
-        if (this.$saveBtn === null) {
+        if (this.$saveBtn === null || this.activeProviderId === null) {
             return;
         }
+        const providerId: string = this.activeProviderId;
         const labels: KeyLabelEntry[] = [];
-        for (const [filename, key] of this.labels.entries()) {
-            labels.push({ filename: filename, key: key });
+        for (const [path, key] of this.labels.entries()) {
+            labels.push({ providerId: providerId, path: path, key: key });
         }
         this.$saveBtn.prop('disabled', true);
         this.$statusEl?.text(KeyLabels.lang('key_labels_saving'));
         try {
-            await KeyLabelsApi.save({ labels: labels });
+            await KeyLabelsApi.save({ providerId: providerId, labels: labels });
             this.$statusEl?.html(
                 `<span class="text-success">${KeyLabels.lang('key_labels_saved')}</span>`,
             );
@@ -338,6 +397,17 @@ export class KeyLabels extends BasePage {
         const labelled: number = this.labels.size;
         const total: number = this.tracks.length;
         this.$counter.text(`${labelled.toString()} / ${total.toString()} ${KeyLabels.lang('key_labels_labelled')}`);
+    }
+
+    /** First `local`-kind provider id in the configured settings list, or `null` if none.
+     *  Per memo: Jellyfin tracks aren't labelable, and there's no "default" provider — we
+     *  simply pick the first match the way the legacy single-provider model did. */
+    private static async resolveLocalProviderId(): Promise<string | null> {
+        const settings = await SettingsApi.get();
+        const local: LocalLibraryProvider | undefined = settings.providers.find(
+            (p: LibraryProvider): p is LocalLibraryProvider => p.kind === 'local',
+        );
+        return local?.id ?? null;
     }
 
     private static formatPredicted(track: RouteTrack): string {

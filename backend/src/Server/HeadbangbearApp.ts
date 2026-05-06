@@ -1,11 +1,12 @@
 import { join } from 'node:path';
 import { BackendApp, ConfigBackend, HttpService } from 'figtree';
 import type { DefaultArgs } from 'figtree-schemas';
+import { DatabaseService } from '../Database/DatabaseService.js';
 import { SettingsStore } from '../Settings/SettingsStore.js';
 import { applyCspOverride } from './applyCspOverride.js';
 import { LibraryService } from './LibraryService.js';
 import { HbbRouteLoader } from './HbbRouteLoader.js';
-import { HbbConfigBackend, type HbbConfig } from './configSchema.js';
+import { applyEnvOverrides, HbbConfigBackend, type HbbConfig } from './configSchema.js';
 
 /**
  * Headbangbear backend application. Boots the figtree `HttpService` plus our custom
@@ -30,12 +31,15 @@ export class HeadbangbearApp extends BackendApp<DefaultArgs, HbbConfig> {
     }
 
     protected override async _initServices(): Promise<void> {
-        const config: HbbConfig | null = this.configInstance.get();
-        if (config === null) {
+        const rawConfig: HbbConfig | null = this.configInstance.get();
+        if (rawConfig === null) {
             throw new Error('HeadbangbearApp: configuration not loaded');
         }
+        const config: HbbConfig = applyEnvOverrides(rawConfig);
+        // DatabaseService starts first so library scan code can hand out repositories.
         // LibraryService must start before HttpService so HbbRouteLoader can reach the library.
-        this._serviceManager.add(new LibraryService(config.library.rootDir));
+        this._serviceManager.add(new DatabaseService(config.database));
+        this._serviceManager.add(new LibraryService(config.dataDir, config.audioCacheMaxBytes));
         this._serviceManager.add(new HttpService(HbbRouteLoader, 'http', [LibraryService.NAME]));
     }
 }

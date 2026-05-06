@@ -4,6 +4,7 @@ import { Router } from 'express';
 import { DefaultRoute } from 'figtree';
 import {
     KeyLabelsBodySchema,
+    KeyLabelsQuerySchema,
     KeyLabelsResponseSchema,
     type KeyLabelEntry,
     type KeyLabelsBody,
@@ -14,18 +15,22 @@ import type { LibraryService } from '../LibraryService.js';
 const TRUTH_FILENAME: string = 'truth.json';
 
 /**
- * Reads / writes `<library>/truth.json` — the ground-truth file consumed by the existing
- * `KeyEval` CLI (`npm run key-eval -- <library> <truth.json>`). Letting the frontend write
- * to it directly turns the labelling chore from "open a JSON file in an editor" into
- * "click through tracks in the browser, save, run sweep" — the only reason the
- * `KeyProfileSweep` infra has been sitting unused.
+ * Reads / writes per-local-provider `<rootDir>/truth.json` — the ground-truth
+ * file consumed by the existing `KeyEval` CLI. Letting the frontend write to it
+ * directly turns the labelling chore from "open a JSON file in an editor" into
+ * "click through tracks in the browser, save, run sweep".
  *
- * On-disk format is a flat `{ filename: keyString }` map; the wire format is the same
- * data as a `{ labels: [{ filename, key }] }` array. POST replaces the file wholesale —
- * empty `key` strings are treated as "no label" and dropped from the on-disk map.
+ * Wire format is `{ labels: [{ providerId, path, key }] }` — the `providerId`
+ * round-trips so the frontend's per-provider tab knows which entries belong to
+ * which library.
  *
- * `GET` 200 even when truth.json is missing — returns `{ labels: [] }` so the frontend
- * can boot with a clean slate.
+ * On-disk format remains the legacy `{ filename: keyString }` map (one file per
+ * provider), so existing `npm run key-eval -- <library> <truth.json>` keeps
+ * working. `path` is the per-provider source-id i.e. relative path under
+ * `rootDir` — that matches what `KeyEval` already expects.
+ *
+ * Jellyfin providers are accepted in the GET query and return `{ labels: [] }`
+ * (no on-disk truth file makes sense without local audio).
  */
 export class KeyLabelsRoute extends DefaultRoute {
 
@@ -37,8 +42,12 @@ export class KeyLabelsRoute extends DefaultRoute {
         this.service = service;
     }
 
-    public async list(): Promise<KeyLabelsResponse> {
-        const filePath: string = this.truthPath();
+    public async list(providerId: string): Promise<KeyLabelsResponse> {
+        const rootDir: string | null = this.service.getLocalRootDir(providerId);
+        if (rootDir === null) {
+            return { labels: [] };
+        }
+        const filePath: string = join(rootDir, TRUTH_FILENAME);
         let raw: string;
         try {
             raw = await fs.readFile(filePath, 'utf8');
@@ -55,41 +64,59 @@ export class KeyLabelsRoute extends DefaultRoute {
             return { labels: [] };
         }
         const labels: KeyLabelEntry[] = [];
-        for (const [filename, key] of Object.entries(parsed as Record<string, unknown>)) {
+        for (const [path, key] of Object.entries(parsed as Record<string, unknown>)) {
             if (typeof key !== 'string' || key.length === 0) {
                 continue;
             }
-            labels.push({ filename: filename, key: key });
+            labels.push({ providerId: providerId, path: path, key: key });
         }
-        labels.sort((a, b): number => a.filename.localeCompare(b.filename));
+        labels.sort((a, b): number => a.path.localeCompare(b.path));
         return { labels: labels };
     }
 
     public async save(body: KeyLabelsBody): Promise<KeyLabelsResponse> {
+        const rootDir: string | null = this.service.getLocalRootDir(body.providerId);
+        if (rootDir === null) {
+            throw new Error(`Provider not local or unknown: ${body.providerId}`);
+        }
         const map: Record<string, string> = {};
         for (const entry of body.labels) {
+            if (entry.providerId !== body.providerId) {
+                continue;
+            }
             const key: string = entry.key.trim();
             if (key.length === 0) {
                 continue;
             }
-            map[entry.filename] = key;
+            map[entry.path] = key;
         }
         const sortedMap: Record<string, string> = {};
-        for (const filename of Object.keys(map).sort((a, b): number => a.localeCompare(b))) {
-            sortedMap[filename] = map[filename] as string;
+        for (const path of Object.keys(map).sort((a, b): number => a.localeCompare(b))) {
+            sortedMap[path] = map[path] as string;
         }
-        await fs.writeFile(this.truthPath(), `${JSON.stringify(sortedMap, null, 2)}\n`, 'utf8');
-        return this.list();
+        await fs.writeFile(
+            join(rootDir, TRUTH_FILENAME),
+            `${JSON.stringify(sortedMap, null, 2)}\n`,
+            'utf8',
+        );
+        return this.list(body.providerId);
     }
 
     public override getExpressRouter(): Router {
         this._get(
             this._getUrl('v1', 'library', 'key-labels'),
             false,
-            async (_req, _res, _data): Promise<KeyLabelsResponse> => this.list(),
+            async (_req, _res, data): Promise<KeyLabelsResponse> => {
+                const providerId: string | undefined = data.query?.providerId;
+                if (providerId === undefined) {
+                    throw new Error('Missing required query parameter: providerId');
+                }
+                return this.list(providerId);
+            },
             {
-                description: 'Return the current ground-truth key labels (truth.json).',
+                description: 'Ground-truth key labels for a local provider (truth.json).',
                 tags: ['library'],
+                querySchema: KeyLabelsQuerySchema,
                 responseBodySchema: KeyLabelsResponseSchema,
             },
         );
@@ -99,17 +126,13 @@ export class KeyLabelsRoute extends DefaultRoute {
             async (req, _res, _data): Promise<KeyLabelsResponse> =>
                 this.save(req.body as KeyLabelsBody),
             {
-                description: 'Replace the ground-truth key labels (writes truth.json).',
+                description: 'Replace the ground-truth key labels for the given provider.',
                 tags: ['library'],
                 bodySchema: KeyLabelsBodySchema,
                 responseBodySchema: KeyLabelsResponseSchema,
             },
         );
         return super.getExpressRouter();
-    }
-
-    private truthPath(): string {
-        return join(this.service.getRootDir(), TRUTH_FILENAME);
     }
 
 }

@@ -1,12 +1,19 @@
 import { promises as fs } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { DataSource } from 'typeorm';
 import { TransitionStyleSchema, type TransitionStyle } from '@headbangbear/schemas';
 import { EssentiaAudioAnalyzer } from '../Analysis/EssentiaAudioAnalyzer.js';
+import { AnalyzedTrackEntity } from '../Database/Entity/AnalyzedTrackEntity.js';
+import { TrackMetadataEntity } from '../Database/Entity/TrackMetadataEntity.js';
 import { TrackLibrary, type AnalyzedTrack } from '../Library/TrackLibrary.js';
 import { MixTransition, type TransitionPlan } from '../Mix/MixTransition.js';
+import { createCliDataSource } from './cliDataSource.js';
+
+const CLI_PROVIDER_ID: string = 'cli';
 
 export class MixPlan {
+
     private readonly library: TrackLibrary;
 
     public constructor(library: TrackLibrary) {
@@ -14,19 +21,18 @@ export class MixPlan {
     }
 
     public async run(
-        fromPath: string,
-        toPath: string,
-        libraryDir: string,
+        fromRelativePath: string,
+        toRelativePath: string,
         style?: TransitionStyle,
     ): Promise<TransitionPlan> {
-        await this.library.scan(libraryDir);
-        const from: AnalyzedTrack | null = this.library.findByPath(fromPath);
-        const to: AnalyzedTrack | null = this.library.findByPath(toPath);
+        await this.library.scan();
+        const from: AnalyzedTrack | null = this.library.findByPath(fromRelativePath);
+        const to: AnalyzedTrack | null = this.library.findByPath(toRelativePath);
         if (from === null) {
-            throw new Error(`Track ${fromPath} not found in library after scan`);
+            throw new Error(`Track ${fromRelativePath} not found in library after scan`);
         }
         if (to === null) {
-            throw new Error(`Track ${toPath} not found in library after scan`);
+            throw new Error(`Track ${toRelativePath} not found in library after scan`);
         }
         return new MixTransition(from, to).plan({ style: style });
     }
@@ -66,23 +72,31 @@ export class MixPlan {
             );
             return 1;
         }
-        const cachePath: string = join(fromDir, '.analysis-cache.json');
-        const lib: TrackLibrary = new TrackLibrary(
-            new EssentiaAudioAnalyzer(),
-            cachePath,
-            (event): void => {
-                if (event.phase === 'analyse') {
-                    process.stderr.write(
-                        `[${event.current.toString()}/${event.total.toString()}] analyzing ${basename(event.name)}\n`,
-                    );
-                }
-            },
-        );
-        const cli: MixPlan = new MixPlan(lib);
-        const plan: TransitionPlan = await cli.run(fromPath, toPath, fromDir, style);
-        console.log(JSON.stringify(plan, null, 2));
-        return 0;
+        const ds: DataSource = await createCliDataSource();
+        try {
+            const lib: TrackLibrary = new TrackLibrary(
+                CLI_PROVIDER_ID,
+                fromDir,
+                new EssentiaAudioAnalyzer(),
+                ds.getRepository(AnalyzedTrackEntity),
+                ds.getRepository(TrackMetadataEntity),
+                (event): void => {
+                    if (event.phase === 'analyse') {
+                        process.stderr.write(
+                            `[${event.current.toString()}/${event.total.toString()}] analyzing ${basename(event.name)}\n`,
+                        );
+                    }
+                },
+            );
+            const cli: MixPlan = new MixPlan(lib);
+            const plan: TransitionPlan = await cli.run(basename(fromPath), basename(toPath), style);
+            console.log(JSON.stringify(plan, null, 2));
+            return 0;
+        } finally {
+            await ds.destroy();
+        }
     }
+
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

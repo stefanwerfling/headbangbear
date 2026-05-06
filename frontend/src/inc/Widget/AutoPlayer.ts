@@ -1,6 +1,7 @@
-import type { DjSet } from '@headbangbear/schemas';
+import type { DjSet, TrackRef } from '@headbangbear/schemas';
+import { DjSetApi } from '../Api/DjSetApi.js';
 
-export type TrackChangeFn = (index: number, trackPath: string) => void;
+export type TrackChangeFn = (index: number, providerId: string, trackPath: string) => void;
 export type FinishedFn = () => void;
 
 export type TrackProgressFn = (index: number, trackTimeSec: number) => void;
@@ -29,6 +30,12 @@ const EQ_GAIN_MIN_DB: number = -12;
 const EQ_GAIN_MAX_DB: number = 12;
 
 const ZERO_BAND_EQ: BandEqState = { lowDb: 0, midDb: 0, highDb: 0 };
+
+/** Size of the rolling DJ-set prefetch window — `[current, current+1, current+2]`.
+ *  Has to match the backend's appetite: bigger means more concurrent Jellyfin
+ *  connections in flight, smaller means the next-track might not be hot when
+ *  the crossfade arrives. 3 is a balanced default. */
+const PREFETCH_WINDOW_SIZE: number = 3;
 
 /** HTMLMediaElement.preservesPitch is the standard; some older Safaris exposed `webkitPreservesPitch`. */
 type WithPreservesPitch = HTMLMediaElement & {
@@ -348,6 +355,22 @@ export class AutoPlayer {
         return 'audio/webm';
     }
 
+    /** Slice of `[fromIndex, fromIndex+PREFETCH_WINDOW_SIZE)` mapped down to
+     *  `TrackRef`s for the prefetch endpoint. Returns up to N entries — fewer
+     *  near the end of the chain. */
+    private static windowFrom(djSet: DjSet, fromIndex: number): TrackRef[] {
+        const out: TrackRef[] = [];
+        const end: number = Math.min(fromIndex + PREFETCH_WINDOW_SIZE, djSet.tracks.length);
+        for (let i = fromIndex; i < end; i++) {
+            const t = djSet.tracks[i];
+            if (t === undefined) {
+                continue;
+            }
+            out.push({ providerId: t.providerId, path: t.path });
+        }
+        return out;
+    }
+
     private static clampVolume(v: number): number {
         if (!Number.isFinite(v)) {
             return 1.0;
@@ -375,17 +398,51 @@ export class AutoPlayer {
             return;
         }
 
-        // Pre-load all audio elements before scheduling so we know they're ready to play
-        // when their start timeouts fire. `canplaythrough` is the strongest readiness signal.
-        const audios: HTMLAudioElement[] = await Promise.all(
-            djSet.tracks.map((t): Promise<HTMLAudioElement> => this.fetchAudio(t.path))
-        );
+        // Tell the backend to pre-warm the audio cache for the first 3 tracks. We
+        // await this so the first audio.load() below hits a hot cache rather than
+        // racing against the Jellyfin proxy. Best-effort: a backend that doesn't
+        // have the endpoint (older builds) just yields a 404, which we swallow.
+        try {
+            await DjSetApi.prefetch({ window: AutoPlayer.windowFrom(djSet, 0) });
+        } catch (err) {
+            console.warn('AutoPlayer: initial prefetch failed (continuing):', err);
+        }
+
+        // Create the `<audio>` shells + audio graph for ALL tracks upfront, but DO
+        // NOT set `src` yet. Eagerly setting all `src` would fire one HTTP request
+        // per track in parallel; with N=200 tracks the browser queues 194 (only 6
+        // concurrent connections allowed) and the backend buckles under the 6
+        // simultaneous Jellyfin proxies + scanner. Lazy-load (audio.src set just
+        // before play, see PRELOAD_LEAD_MS) spaces the load over the chain's
+        // play-time so backend pressure is constant rather than burst.
+        const audios: HTMLAudioElement[] = djSet.tracks.map((): HTMLAudioElement => {
+            const a: HTMLAudioElement = new Audio();
+            a.crossOrigin = 'anonymous';
+            a.preload = 'auto';
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            return a;
+        });
+        // Track 0 is loaded synchronously and we await `canplay` — by the time
+        // play() returns, the first track is genuinely ready. Subsequent tracks
+        // load just-in-time via the per-track schedule below.
+        const firstAudio: HTMLAudioElement = audios[0] as HTMLAudioElement;
+        const firstTrack = djSet.tracks[0];
+        if (firstTrack !== undefined) {
+            firstAudio.src = AutoPlayer.audioUrl(firstTrack.providerId, firstTrack.path);
+            firstAudio.load();
+            await AutoPlayer.awaitCanPlay(firstAudio);
+        }
 
         let scheduleTime: number = this.ctx.currentTime + 0.5;
         let lastEndWall: number = scheduleTime;
 
         for (let i = 0; i < djSet.tracks.length; i++) {
             const audio: HTMLAudioElement = audios[i] as HTMLAudioElement;
+            const track = djSet.tracks[i];
+            if (track === undefined) {
+                continue;
+            }
             const transitionIn = i > 0 ? djSet.transitions[i - 1] : undefined;
             const transitionOut = i < djSet.transitions.length ? djSet.transitions[i] : undefined;
 
@@ -425,7 +482,6 @@ export class AutoPlayer {
 
             const startOffsetSec: number =
                 transitionIn !== undefined ? transitionIn.cueInSec : 0;
-            audio.currentTime = startOffsetSec;
             const startWall: number = scheduleTime;
             let endWall: number;
 
@@ -437,8 +493,36 @@ export class AutoPlayer {
                 gain.gain.setValueAtTime(1, startWall);
             }
 
+            // Lazy load: track 0 is already loaded above; tracks 1..N get a load
+            // timer that fires `audio.src = url; audio.load()` PRELOAD_LEAD_MS
+            // before their scheduled play. The backend's rolling 3-window
+            // prefetch keeps the cache warm a few tracks ahead, so by the time
+            // the load fires the bytes are usually local (sendFile, fast).
+            if (i > 0) {
+                const url: string = AutoPlayer.audioUrl(track.providerId, track.path);
+                const PRELOAD_LEAD_MS: number = 30_000;
+                const loadDelayMs: number = Math.max(
+                    0,
+                    (startWall - this.ctx.currentTime) * 1000 - PRELOAD_LEAD_MS,
+                );
+                const loadTimer: number = window.setTimeout((): void => {
+                    audio.src = url;
+                    audio.load();
+                }, loadDelayMs);
+                this.timers.push(loadTimer);
+            }
+
             const playDelayMs: number = Math.max(0, (startWall - this.ctx.currentTime) * 1000);
             const playTimer: number = window.setTimeout((): void => {
+                // currentTime can only be set after metadata is loaded — we do
+                // it here so it sticks even if the load() fired late. If the
+                // browser hasn't loaded metadata yet, this throws; swallow and
+                // let play() drive (it will queue the seek).
+                try {
+                    audio.currentTime = startOffsetSec;
+                } catch {
+                    // metadata not ready; play() will buffer and start at 0 briefly
+                }
                 void audio.play().catch((err: unknown): void => {
                     console.warn('AutoPlayer: audio.play() rejected', err);
                 });
@@ -464,7 +548,10 @@ export class AutoPlayer {
                 scheduleTime = fadeOutStartWall;
                 endWall = fadeOutEndWall;
             } else {
-                endWall = startWall + (audio.duration - startOffsetSec) / pitchRate;
+                // Last track: use the analysed `track.durationSec` instead of
+                // `audio.duration` because the latter requires loadedmetadata,
+                // which hasn't fired yet for lazy-loaded tracks.
+                endWall = startWall + (track.durationSec - startOffsetSec) / pitchRate;
             }
             lastEndWall = Math.max(lastEndWall, endWall);
 
@@ -483,15 +570,27 @@ export class AutoPlayer {
                 trackEqHigh: trackEqHigh
             });
 
-            if (onTrackChange !== undefined) {
-                const trackIndex: number = i;
-                const path: string = djSet.tracks[i]?.path ?? '';
-                const delayMs: number = Math.max(0, (startWall - this.ctx.currentTime) * 1000);
-                const timerId: number = window.setTimeout((): void => {
-                    onTrackChange(trackIndex, path);
-                }, delayMs);
-                this.timers.push(timerId);
-            }
+            // Schedule the track-change callback AND a sliding prefetch update
+            // for the same wall-clock instant. The window-update is fire-and-
+            // forget — by the time the user actually needs track[i+1] / [i+2],
+            // either the backend has them ready (cache hit) or it's still
+            // proxying from Jellyfin (cache miss). Both work; the prefetch is
+            // an optimisation, not a barrier.
+            const trackIndex: number = i;
+            const path: string = djSet.tracks[i]?.path ?? '';
+            const providerId: string = djSet.tracks[i]?.providerId ?? '';
+            const delayMs: number = Math.max(0, (startWall - this.ctx.currentTime) * 1000);
+            const timerId: number = window.setTimeout((): void => {
+                if (onTrackChange !== undefined) {
+                    onTrackChange(trackIndex, providerId, path);
+                }
+                void DjSetApi.prefetch({
+                    window: AutoPlayer.windowFrom(djSet, trackIndex),
+                }).catch((err: unknown): void => {
+                    console.warn('AutoPlayer: sliding prefetch failed:', err);
+                });
+            }, delayMs);
+            this.timers.push(timerId);
         }
 
         if (onFinished !== undefined) {
@@ -516,6 +615,12 @@ export class AutoPlayer {
             window.clearTimeout(timerId);
         }
         this.timers = [];
+        // Release the prefetch window so the backend evicts the last few cached
+        // tracks. Fire-and-forget — `stop()` is sync and the cache delete is
+        // best-effort cleanup, not on the user's critical path.
+        void DjSetApi.prefetch({ window: [] }).catch((): void => {
+            // already-disconnected backend; nothing to do
+        });
         for (const t of this.scheduled) {
             try {
                 t.audio.pause();
@@ -571,32 +676,48 @@ export class AutoPlayer {
         }
     }
 
-    private fetchAudio(trackPath: string): Promise<HTMLAudioElement> {
-        const url: string = `api/v1/library/audio?path=${encodeURIComponent(trackPath)}`;
-        return new Promise<HTMLAudioElement>((resolve, reject): void => {
-            const audio: HTMLAudioElement = new Audio();
-            audio.crossOrigin = 'anonymous';
-            audio.preload = 'auto';
-            // Hidden detached element. Some browsers historically refused to play unless
-            // attached to the DOM; appending a hidden node is the safe path.
-            audio.style.display = 'none';
+    /** Backend audio URL for a `(providerId, path)` pair. Centralised so URL
+     *  encoding is consistent everywhere. */
+    private static audioUrl(providerId: string, trackPath: string): string {
+        return `api/v1/library/audio?providerId=${encodeURIComponent(providerId)}`
+            + `&path=${encodeURIComponent(trackPath)}`;
+    }
+
+    /** Resolve when the browser can start playing the audio (`canplay` /
+     *  `loadeddata` event), or after a 30 s safety timeout. Always resolves —
+     *  play() decides what to do on a non-ready element. Used for the very
+     *  first track where we genuinely need the metadata before scheduling. */
+    private static awaitCanPlay(audio: HTMLAudioElement): Promise<void> {
+        return new Promise<void>((resolve): void => {
+            const SAFETY_TIMEOUT_MS: number = 30_000;
+            let timeoutId: number | null = null;
+            const cleanup = (): void => {
+                audio.removeEventListener('canplay', onReady);
+                audio.removeEventListener('loadeddata', onReady);
+                audio.removeEventListener('error', onError);
+                if (timeoutId !== null) {
+                    window.clearTimeout(timeoutId);
+                    timeoutId = null;
+                }
+            };
             const onReady = (): void => {
                 cleanup();
-                resolve(audio);
+                resolve();
             };
             const onError = (): void => {
                 cleanup();
-                reject(new Error(`Failed to load audio: ${url}`));
+                resolve();
             };
-            const cleanup = (): void => {
-                audio.removeEventListener('canplaythrough', onReady);
-                audio.removeEventListener('error', onError);
-            };
-            audio.addEventListener('canplaythrough', onReady, { once: true });
+            audio.addEventListener('canplay', onReady, { once: true });
+            audio.addEventListener('loadeddata', onReady, { once: true });
             audio.addEventListener('error', onError, { once: true });
-            audio.src = url;
-            document.body.appendChild(audio);
-            audio.load();
+            timeoutId = window.setTimeout((): void => {
+                console.warn(
+                    `AutoPlayer: first track not ready after ${(SAFETY_TIMEOUT_MS / 1000).toString()}s — proceeding anyway`,
+                );
+                cleanup();
+                resolve();
+            }, SAFETY_TIMEOUT_MS);
         });
     }
 

@@ -2,24 +2,21 @@ import { promises as fs } from 'node:fs';
 import { SettingsSchema, type Settings } from '@headbangbear/schemas';
 import { type SchemaErrors } from 'vts';
 
-/** Empty defaults — local-source library, no Jellyfin credentials. */
+/** Empty defaults — no providers configured. The Settings UI starts on a blank
+ *  list and the user adds entries explicitly. */
 export const DEFAULT_SETTINGS: Settings = {
-    librarySource: 'local',
-    jellyfin: {
-        url: '',
-        apiKey: '',
-        userId: '',
-    },
+    providers: [],
 };
 
 /**
  * JSON-on-disk persistence for the dynamic settings the user edits via the Settings
- * page (library source + Jellyfin credentials). Lives next to `backend/config.json`
- * but separately so the static figtree config doesn't get rewritten on every save.
+ * page (the multi-provider library list). Lives next to `backend/config.json` but
+ * separately so the static figtree config doesn't get rewritten on every save.
  *
  * Forgiving on read: missing file, bad JSON, or schema mismatch all return the defaults.
  * That way the Settings page boots cleanly on a fresh install and a corrupt save
- * doesn't lock the app.
+ * doesn't lock the app. Single-instance pattern; `install()` once at app boot,
+ * `getInstance()` everywhere else.
  */
 export class SettingsStore {
 
@@ -33,11 +30,6 @@ export class SettingsStore {
         this.filePath = filePath;
     }
 
-    /**
-     * Bind the process-wide singleton. Called once from `HeadbangbearApp` so routes can
-     * reach the same store instance via `SettingsStore.getInstance()` without threading
-     * the path through every route loader.
-     */
     public static install(filePath: string): SettingsStore {
         SettingsStore.singleton = new SettingsStore(filePath);
         return SettingsStore.singleton;
@@ -87,14 +79,7 @@ export class SettingsStore {
     }
 
     private static cloneDefaults(): Settings {
-        return {
-            librarySource: DEFAULT_SETTINGS.librarySource,
-            jellyfin: {
-                url: DEFAULT_SETTINGS.jellyfin.url,
-                apiKey: DEFAULT_SETTINGS.jellyfin.apiKey,
-                userId: DEFAULT_SETTINGS.jellyfin.userId,
-            },
-        };
+        return { providers: [] };
     }
 
 }

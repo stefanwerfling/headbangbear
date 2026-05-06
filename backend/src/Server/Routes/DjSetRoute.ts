@@ -1,31 +1,57 @@
 import { Router } from 'express';
 import { DefaultRoute } from 'figtree';
 import {
-    DjSetPlanner,
-    DjSetSchema,
+    DjSetBodySchema,
+    DjSetPlanStatusSchema,
     type DjSet,
-    type DjSetPlannerOptions,
-} from '../../DjSet/DjSetPlanner.js';
+    type DjSetBody,
+    type DjSetPlanStatus,
+} from '@headbangbear/schemas';
+import { DjSetPlanner, type DjSetPlannerOptions } from '../../DjSet/DjSetPlanner.js';
+import { DjSetPlannerJob } from '../../DjSet/DjSetPlannerJob.js';
 import type { AnalyzedTrack } from '../../Library/TrackLibrary.js';
-import type { LibraryFacade } from '../LibraryService.js';
-import { DjSetBodySchema, type DjSetBody } from '../schemas.js';
+import type { LibraryService } from '../LibraryService.js';
 
 /**
- * `POST /api/v1/dj-set` — runs `DjSetPlanner` over the entire library and returns the
- * resulting set. Body fields all map 1:1 to `DjSetPlannerOptions`. The optional
- * `startPath` is resolved against the library before planning.
+ * `POST /api/v1/dj-set/plan` — async kick-off. Runs `DjSetPlanner` in a worker
+ * thread (so the beam search doesn't block the HTTP event loop) and returns the
+ * job's current status immediately. The frontend polls `GET .../plan-status`
+ * for progress + final result.
+ *
+ * Calling POST again while a job is `running` supersedes the in-flight job:
+ * the worker is terminated, a new one is spawned, the old result is dropped.
  */
 export class DjSetRoute extends DefaultRoute {
-    private readonly library: LibraryFacade;
 
-    public constructor(library: LibraryFacade) {
+    private readonly service: LibraryService;
+
+    public constructor(service: LibraryService) {
         super();
         this._uriBase = '/api/';
-        this.library = library;
+        this.service = service;
     }
 
+    public start(body: DjSetBody): DjSetPlanStatus {
+        // `enabledTracks()` skips soft-disabled tracks — the planner never
+        // sees them, so they can't end up in mixes.
+        const tracks: AnalyzedTrack[] = this.service.enabledTracks();
+        const options: DjSetPlannerOptions = this.bodyToOptions(body);
+        return DjSetPlannerJob.getInstance().start(tracks, options);
+    }
+
+    /**
+     * Test seam — runs the planner synchronously in-process (no worker thread).
+     * Production goes through `start()` which kicks off a worker so the HTTP
+     * thread isn't blocked. Tests prefer the sync path because it gives them
+     * the result immediately and doesn't depend on worker bootstrap timing.
+     */
     public plan(body: DjSetBody): DjSet {
-        const tracks: AnalyzedTrack[] = this.library.tracks();
+        const tracks: AnalyzedTrack[] = this.service.enabledTracks();
+        const options: DjSetPlannerOptions = this.bodyToOptions(body);
+        return new DjSetPlanner(tracks).plan(options);
+    }
+
+    private bodyToOptions(body: DjSetBody): DjSetPlannerOptions {
         const options: DjSetPlannerOptions = {};
         if (body.energyDirection !== undefined) {
             options.energyDirection = body.energyDirection;
@@ -42,10 +68,15 @@ export class DjSetRoute extends DefaultRoute {
         if (body.tryAllStarts !== undefined) {
             options.tryAllStarts = body.tryAllStarts;
         }
-        if (body.startPath !== undefined) {
-            const start: AnalyzedTrack | null = this.library.findByPath(body.startPath);
+        if (body.start !== undefined) {
+            const start: AnalyzedTrack | null = this.service.findByRef(
+                body.start.providerId,
+                body.start.path,
+            );
             if (start === null) {
-                throw new Error(`Start track not found in library: ${body.startPath}`);
+                throw new Error(
+                    `Start track not found: ${body.start.providerId}/${body.start.path}`,
+                );
             }
             options.start = start;
         }
@@ -58,22 +89,24 @@ export class DjSetRoute extends DefaultRoute {
         if (body.avoidSameArtist !== undefined) {
             options.avoidSameArtist = body.avoidSameArtist;
         }
-        return new DjSetPlanner(tracks).plan(options);
+        return options;
     }
 
     public override getExpressRouter(): Router {
         this._post(
             this._getUrl('v1', 'dj-set', 'plan'),
             false,
-            async (_req, _res, data): Promise<DjSet> => {
-                return this.plan(data.body ?? {});
+            async (_req, _res, data): Promise<DjSetPlanStatus> => {
+                return this.start(data.body ?? {});
             },
             {
                 description:
-                    'Plan a Camelot-compatible chain over the full library. Defaults: strategy=greedy, energyDirection=up, tryAllStarts=true.',
+                    'Kick off a Camelot-compatible chain plan over the full combined library. '
+                    + 'Returns immediately with the running job status; poll '
+                    + '`GET /api/v1/dj-set/plan-status` for progress + result.',
                 tags: ['dj-set'],
                 bodySchema: DjSetBodySchema,
-                responseBodySchema: DjSetSchema,
+                responseBodySchema: DjSetPlanStatusSchema,
             },
         );
         return super.getExpressRouter();

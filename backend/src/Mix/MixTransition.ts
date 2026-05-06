@@ -92,6 +92,7 @@ export class MixTransition {
 
         return {
             from: {
+                providerId: this.from.providerId,
                 path: this.from.path,
                 camelot: this.from.result.camelot.toString(),
                 bpm: fromBpm,
@@ -99,6 +100,7 @@ export class MixTransition {
                 drops: this.from.result.drops,
             },
             to: {
+                providerId: this.to.providerId,
                 path: this.to.path,
                 camelot: this.to.result.camelot.toString(),
                 originalBpm: toBpm,

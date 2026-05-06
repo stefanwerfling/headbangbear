@@ -1,14 +1,15 @@
 import { Vts, type ExtractSchemaResultType } from 'vts';
 import { RouteTrackSchema } from './RouteTrack.js';
-import { LibrarySourceSchema } from './Settings.js';
 
 export const LibraryResponseSchema = Vts.object({
-    libraryDir: Vts.string(),
     tracks: Vts.array(RouteTrackSchema),
 });
 export type LibraryResponse = ExtractSchemaResultType<typeof LibraryResponseSchema>;
 
+/** Track lookup query used by `/api/v1/tracks/compatible` — `(providerId, path)` is
+ *  the per-track identity used everywhere in the API. */
 export const CompatibleQuerySchema = Vts.object({
+    providerId: Vts.string(),
     path: Vts.string(),
 });
 export type CompatibleQuery = ExtractSchemaResultType<typeof CompatibleQuerySchema>;
@@ -42,7 +43,11 @@ export type ScanState = ExtractSchemaResultType<typeof ScanStateSchema>;
  *  - `currentName` — the file path / track name currently being processed.
  *  - `currentPhase` — `'analyse'` (slow essentia run), `'cache'` (cache-hit fast path),
  *    `'error'` (a single-track error; the scan continues for the next track).
- *  - `librarySource` — echoes the active source so the UI can label the banner.
+ *  - `currentProviderId` — provider whose scan is currently active. Empty string when
+ *    no scan running. The UI labels the banner with this so the user can see which
+ *    library is being processed when there are multiple.
+ *  - `providerIndex` / `providerCount` — 1-based provider counter for sequential scans
+ *    across all configured providers (e.g. `2 / 3` when scanning the second of three).
  */
 export const ScanStatusSchema = Vts.object({
     state: ScanStateSchema,
@@ -55,7 +60,9 @@ export const ScanStatusSchema = Vts.object({
         Vts.equal('error' as const),
     ])),
     error: Vts.optional(Vts.string()),
-    librarySource: LibrarySourceSchema,
+    currentProviderId: Vts.string(),
+    providerIndex: Vts.number(),
+    providerCount: Vts.number(),
     startedAtMs: Vts.optional(Vts.number()),
     finishedAtMs: Vts.optional(Vts.number()),
 });

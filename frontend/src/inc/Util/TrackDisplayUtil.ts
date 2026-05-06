@@ -13,9 +13,12 @@ const COVER_THUMB_SIZE_PX: number = 40;
  */
 export class TrackDisplayUtil {
 
-    /** Backend cover route URL for a track, regardless of whether a cover actually exists. */
+    /** Backend cover route URL for a track, regardless of whether a cover actually exists.
+     *  Both `providerId` and `path` are required because the cover cache is namespaced per
+     *  provider (no cross-provider key collisions). */
     public static coverUrl(track: RouteTrack): string {
-        return `api/v1/library/cover?path=${encodeURIComponent(track.path)}`;
+        return `api/v1/library/cover?providerId=${encodeURIComponent(track.providerId)}`
+            + `&path=${encodeURIComponent(track.path)}`;
     }
 
     /**

@@ -1,5 +1,5 @@
 import { promises as fs } from 'node:fs';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { Router } from 'express';
 import { DefaultRoute } from 'figtree';
 import {
@@ -24,15 +24,13 @@ const DEFAULT_PROFILES: readonly string[] = [
 ];
 
 /**
- * `POST /api/v1/library/profile-sweep` — runs the configured key-detection profiles against
- * the library's `truth.json`, scores each via MIREX, and returns the ranked report. Results
- * are cached per-profile under `<library>/.keyeval-cache.<profile>.json`, so the second call
- * with the same `(profiles, files)` set is instant; the first call however blocks for as long
- * as essentia takes to analyse every track × every profile (~3s/track each), which can run
- * into minutes for unseen profiles. Frontend warns about that before invoking.
+ * `POST /api/v1/library/profile-sweep` — runs the configured key-detection profiles
+ * against a single local provider's `truth.json`, scores each via MIREX, returns
+ * the ranked report. Per-profile cache lives at
+ * `<rootDir>/.keyeval-cache.<profile>.json` so the second call is instant.
  *
- * Errors out with 400 when `truth.json` is missing/empty/contains no labels resolvable to
- * library files — there's nothing to score against, so no point spinning up the analyser.
+ * Sweeps only apply to `local`-kind providers — Jellyfin tracks have no on-disk
+ * audio for re-analysis. Caller picks via `body.providerId`.
  */
 export class KeyProfileSweepRoute extends DefaultRoute {
 
@@ -45,8 +43,11 @@ export class KeyProfileSweepRoute extends DefaultRoute {
     }
 
     public async run(body: KeyProfileSweepBody): Promise<KeyProfileSweepReport> {
-        const libraryDir: string = this.service.getRootDir();
-        const truthPath: string = join(libraryDir, TRUTH_FILENAME);
+        const rootDir: string | null = this.service.getLocalRootDir(body.providerId);
+        if (rootDir === null) {
+            throw new Error(`Provider not local or unknown: ${body.providerId}`);
+        }
+        const truthPath: string = join(rootDir, TRUTH_FILENAME);
 
         const truth: Map<string, MusicalKey> = await KeyProfileSweepRoute.loadTruth(truthPath);
         if (truth.size === 0) {
@@ -54,7 +55,7 @@ export class KeyProfileSweepRoute extends DefaultRoute {
         }
 
         const truthPathByName: Map<string, string> =
-            await KeyProfileSweepRoute.resolveTruthPaths(libraryDir, truth);
+            await KeyProfileSweepRoute.resolveTruthPaths(rootDir, truth);
         if (truthPathByName.size === 0) {
             throw new Error('Truth labels do not match any files currently in the library.');
         }
@@ -65,9 +66,9 @@ export class KeyProfileSweepRoute extends DefaultRoute {
             : DEFAULT_PROFILES;
 
         const sweep: KeyProfileSweep = new KeyProfileSweep(
-            libraryDir,
+            rootDir,
             (profile: string): KeyOnlyAnalyzer =>
-                new EssentiaAudioAnalyzer(undefined, undefined, profile),
+                new EssentiaAudioAnalyzer(undefined, profile),
         );
         return sweep.run(truth, truthPathByName, profiles);
     }
@@ -77,7 +78,7 @@ export class KeyProfileSweepRoute extends DefaultRoute {
             this._getUrl('v1', 'library', 'profile-sweep'),
             false,
             async (req, _res, _data): Promise<KeyProfileSweepReport> =>
-                this.run(req.body as KeyProfileSweepBody ?? {}),
+                this.run(req.body as KeyProfileSweepBody),
             {
                 description: 'Run key-detection profile sweep over truth.json. Slow on first call.',
                 tags: ['library'],
@@ -118,24 +119,35 @@ export class KeyProfileSweepRoute extends DefaultRoute {
     }
 
     /**
-     * Match each truth filename against the actual files on disk. Mirrors the CLI's
-     * `KeyEval.resolveTruthPaths` — handles names with or without the `.mp3` extension.
+     * Match each truth path against the files actually under `rootDir`. Recursive walk —
+     * mirrors `TrackLibrary.findAudioFiles` so the same files visible to the analyser
+     * are visible here. Truth keys are matched both with and without the `.mp3`
+     * extension to mirror the CLI's permissive `KeyEval.resolveTruthPaths`.
      */
     private static async resolveTruthPaths(
-        libraryDir: string,
+        rootDir: string,
         truth: ReadonlyMap<string, MusicalKey>,
     ): Promise<Map<string, string>> {
-        const entries = await fs.readdir(libraryDir, { withFileTypes: true });
         const byNormalised: Map<string, string> = new Map();
-        for (const entry of entries) {
-            if (!entry.isFile() || !/\.mp3$/i.test(entry.name)) {
-                continue;
+        const walk = async (d: string): Promise<void> => {
+            const entries = await fs.readdir(d, { withFileTypes: true });
+            for (const entry of entries) {
+                if (entry.name.startsWith('.')) {
+                    continue;
+                }
+                const p: string = join(d, entry.name);
+                if (entry.isDirectory()) {
+                    await walk(p);
+                } else if (entry.isFile() && /\.mp3$/i.test(entry.name)) {
+                    const rel: string = sep === '/'
+                        ? p.slice(rootDir.length + 1)
+                        : p.slice(rootDir.length + 1).split(sep).join('/');
+                    byNormalised.set(KeyProfileSweepRoute.normalizeName(rel), p);
+                    byNormalised.set(KeyProfileSweepRoute.normalizeName(entry.name), p);
+                }
             }
-            byNormalised.set(
-                KeyProfileSweepRoute.normalizeName(entry.name),
-                join(libraryDir, entry.name),
-            );
-        }
+        };
+        await walk(rootDir);
         const out: Map<string, string> = new Map();
         for (const name of truth.keys()) {
             const filePath: string | undefined = byNormalised.get(name);

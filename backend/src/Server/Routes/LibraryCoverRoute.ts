@@ -5,16 +5,19 @@ import { Vts, type ExtractSchemaResultType } from 'vts';
 import type { LibraryService } from '../LibraryService.js';
 
 const CoverQuerySchema = Vts.object({
+    providerId: Vts.string(),
     path: Vts.string(),
 });
 type CoverQuery = ExtractSchemaResultType<typeof CoverQuerySchema>;
 
 /**
- * `GET /api/v1/library/cover?path=<abs-path>` — streams a track's cover image. Local
- * libraries serve from the on-disk cover cache (sha1-keyed jpg/png inside `<library>/.covers`,
- * needs `dotfiles: 'allow'` because of the dot prefix); Jellyfin libraries proxy
- * `/Items/{id}/Images/Primary`. Path is validated against the loaded library on both
- * sides so the route can't be used for arbitrary fs / network access.
+ * `GET /api/v1/library/cover?providerId=<id>&path=<source-id>` — streams a track's
+ * cover image. Local providers serve from the per-provider cover cache
+ * (sha1(relativePath)-keyed jpg/png under `<dataDir>/covers/<providerId>/`,
+ * needs `dotfiles: 'allow'` if the path passes through a dotted segment); Jellyfin
+ * providers proxy `/Items/{id}/Images/Primary`.
+ *
+ * Provider lookup + per-track validation happen inside `LibraryService.serveCover`.
  */
 export class LibraryCoverRoute extends DefaultRoute {
 
@@ -31,12 +34,13 @@ export class LibraryCoverRoute extends DefaultRoute {
             this._getUrl('v1', 'library', 'cover'),
             false,
             async (_req, res, data): Promise<DefaultHandlerReturn> => {
+                const providerId: string | undefined = data.query?.providerId;
                 const path: string | undefined = data.query?.path;
-                if (path === undefined) {
-                    res.status(400).send('Missing required query parameter: path');
+                if (providerId === undefined || path === undefined) {
+                    res.status(400).send('Missing required query parameters: providerId, path');
                     return { type: HandlerResultType.handled };
                 }
-                await this.service.serveCover(path, res);
+                await this.service.serveCover(providerId, path, res);
                 return { type: HandlerResultType.handled };
             },
             {

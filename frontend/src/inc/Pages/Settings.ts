@@ -1,42 +1,36 @@
 import { Card, ContentCol, ContentColSize, ContentRow, Lang, LangText } from 'bambooo';
 import type {
-    JellyfinSettings,
+    JellyfinConnection,
+    JellyfinLibraryProvider,
     JellyfinTestResult,
-    LibrarySource,
+    LibraryProvider,
+    LocalLibraryProvider,
     Settings as SettingsData,
 } from '@headbangbear/schemas';
 import { SettingsApi } from '../Api/SettingsApi.js';
 import { BasePage } from './BasePage.js';
 
 /**
- * Settings page — currently exposes the **library source** (Local vs Jellyfin) and a
- * Jellyfin credentials block (URL / API key / User ID) with a test-connection button.
- * Saving the form persists to `<configDir>/.hbb-settings.json` server-side.
+ * Settings page — manages the user's configured **library providers**. Each provider is
+ * either a local directory (`kind: 'local'`) or a Jellyfin server (`kind: 'jellyfin'`).
+ * Multiple of each kind are allowed; an empty list is also valid (the rest of the app
+ * just shows empty Library / Setlist views).
  *
- * The Jellyfin source is wired in a follow-up iteration; this page lets you store +
- * verify credentials so they're ready to go when the provider lands.
+ * Saving persists the whole `providers[]` array to `<configDir>/.hbb-settings.json`. A
+ * per-Jellyfin-entry "Test connection" button hits the backend probe route without
+ * persisting — the UX is "test before save" so a typo can't overwrite working credentials.
  */
 export class Settings extends BasePage {
 
     protected override _name: string = 'settings';
 
+    private providers: LibraryProvider[] = [];
+
     private $card: JQuery<HTMLDivElement> | null = null;
 
-    private $sourceLocal: JQuery<HTMLInputElement> | null = null;
-
-    private $sourceJellyfin: JQuery<HTMLInputElement> | null = null;
-
-    private $jellyfinUrl: JQuery<HTMLInputElement> | null = null;
-
-    private $jellyfinApiKey: JQuery<HTMLInputElement> | null = null;
-
-    private $jellyfinUserId: JQuery<HTMLInputElement> | null = null;
-
-    private $testBtn: JQuery<HTMLButtonElement> | null = null;
+    private $providersList: JQuery<HTMLDivElement> | null = null;
 
     private $saveBtn: JQuery<HTMLButtonElement> | null = null;
-
-    private $testStatus: JQuery<HTMLDivElement> | null = null;
 
     private $saveStatus: JQuery<HTMLSpanElement> | null = null;
 
@@ -58,68 +52,40 @@ export class Settings extends BasePage {
             <div>
                 <p class="text-muted small">${Settings.lang('settings_help')}</p>
 
-                <div class="form-group">
-                    <label class="font-weight-bold mb-2">${Settings.lang('settings_library_source')}</label>
-                    <div>
-                        <div class="custom-control custom-radio custom-control-inline">
-                            <input type="radio" name="hbb-source" value="local" id="hbb-source-local" class="custom-control-input">
-                            <label class="custom-control-label" for="hbb-source-local">${Settings.lang('settings_source_local')}</label>
-                        </div>
-                        <div class="custom-control custom-radio custom-control-inline">
-                            <input type="radio" name="hbb-source" value="jellyfin" id="hbb-source-jellyfin" class="custom-control-input">
-                            <label class="custom-control-label" for="hbb-source-jellyfin">${Settings.lang('settings_source_jellyfin')}</label>
-                        </div>
-                    </div>
-                    <small class="text-muted">${Settings.lang('settings_source_help')}</small>
+                <div class="d-flex align-items-center mb-3" style="gap:0.5rem;">
+                    <button type="button" class="btn btn-sm btn-outline-primary hbb-add-local">
+                        <i class="fas fa-folder-plus mr-1"></i>${Settings.lang('settings_add_local')}
+                    </button>
+                    <button type="button" class="btn btn-sm btn-outline-primary hbb-add-jellyfin">
+                        <i class="fas fa-server mr-1"></i>${Settings.lang('settings_add_jellyfin')}
+                    </button>
                 </div>
+
+                <div class="hbb-providers-list"></div>
 
                 <hr>
 
-                <h5 class="mt-3"><i class="fas fa-server mr-1"></i>Jellyfin</h5>
-                <p class="text-muted small">${Settings.lang('settings_jellyfin_help')}</p>
-
-                <div class="form-row">
-                    <div class="form-group col-md-6">
-                        <label>${Settings.lang('settings_jellyfin_url')}</label>
-                        <input type="text" class="form-control form-control-sm hbb-jellyfin-url" placeholder="http://localhost:8096" autocomplete="off">
-                    </div>
-                    <div class="form-group col-md-6">
-                        <label>${Settings.lang('settings_jellyfin_user_id')} <small class="text-muted">(${Settings.lang('settings_jellyfin_user_id_optional')})</small></label>
-                        <input type="text" class="form-control form-control-sm hbb-jellyfin-user-id" placeholder="${Settings.lang('settings_jellyfin_user_id_placeholder')}" autocomplete="off">
-                        <small class="text-muted">${Settings.lang('settings_jellyfin_user_id_help')}</small>
-                    </div>
-                </div>
-                <div class="form-group">
-                    <label>${Settings.lang('settings_jellyfin_api_key')}</label>
-                    <input type="password" class="form-control form-control-sm hbb-jellyfin-api-key" autocomplete="new-password">
-                </div>
-
-                <div class="d-flex align-items-center flex-wrap" style="gap:0.75rem;">
-                    <button type="button" class="btn btn-sm btn-secondary hbb-jellyfin-test">
-                        <i class="fas fa-plug mr-1"></i>${Settings.lang('settings_jellyfin_test')}
-                    </button>
+                <div class="d-flex align-items-center" style="gap:0.75rem;">
                     <button type="button" class="btn btn-sm btn-primary hbb-settings-save">
                         <i class="fas fa-save mr-1"></i>${Settings.lang('settings_save')}
                     </button>
                     <span class="hbb-save-status text-muted small ml-2"></span>
                 </div>
-                <div class="hbb-test-status mt-3"></div>
             </div>
         `);
         $body.append(this.$card);
 
-        this.$sourceLocal = this.$card.find<HTMLInputElement>('#hbb-source-local');
-        this.$sourceJellyfin = this.$card.find<HTMLInputElement>('#hbb-source-jellyfin');
-        this.$jellyfinUrl = this.$card.find<HTMLInputElement>('.hbb-jellyfin-url');
-        this.$jellyfinApiKey = this.$card.find<HTMLInputElement>('.hbb-jellyfin-api-key');
-        this.$jellyfinUserId = this.$card.find<HTMLInputElement>('.hbb-jellyfin-user-id');
-        this.$testBtn = this.$card.find<HTMLButtonElement>('.hbb-jellyfin-test');
+        this.$providersList = this.$card.find<HTMLDivElement>('.hbb-providers-list');
         this.$saveBtn = this.$card.find<HTMLButtonElement>('.hbb-settings-save');
-        this.$testStatus = this.$card.find<HTMLDivElement>('.hbb-test-status');
         this.$saveStatus = this.$card.find<HTMLSpanElement>('.hbb-save-status');
 
-        this.$testBtn.on('click', (): void => {
-            void this.runTest();
+        this.$card.find<HTMLButtonElement>('.hbb-add-local').on('click', (): void => {
+            this.providers.push(Settings.newLocalProvider());
+            this.renderProviders();
+        });
+        this.$card.find<HTMLButtonElement>('.hbb-add-jellyfin').on('click', (): void => {
+            this.providers.push(Settings.newJellyfinProvider());
+            this.renderProviders();
         });
         this.$saveBtn.on('click', (): void => {
             void this.runSave();
@@ -140,62 +106,222 @@ export class Settings extends BasePage {
             );
             return;
         }
-        if (settings.librarySource === 'jellyfin') {
-            this.$sourceJellyfin?.prop('checked', true);
-        } else {
-            this.$sourceLocal?.prop('checked', true);
-        }
-        this.$jellyfinUrl?.val(settings.jellyfin.url);
-        this.$jellyfinApiKey?.val(settings.jellyfin.apiKey);
-        this.$jellyfinUserId?.val(settings.jellyfin.userId);
+        // Clone so the in-memory state is detached from the SettingsApi response object
+        // (avoids surprising aliasing if the response is cached upstream).
+        this.providers = settings.providers.map((p): LibraryProvider => ({ ...p }));
+        this.renderProviders();
     }
 
-    private currentJellyfin(): JellyfinSettings {
-        return {
-            url: this.$jellyfinUrl?.val()?.toString().trim() ?? '',
-            apiKey: this.$jellyfinApiKey?.val()?.toString().trim() ?? '',
-            userId: this.$jellyfinUserId?.val()?.toString().trim() ?? '',
-        };
-    }
-
-    private currentSource(): LibrarySource {
-        return this.$sourceJellyfin?.is(':checked') === true ? 'jellyfin' : 'local';
-    }
-
-    private async runTest(): Promise<void> {
-        if (this.$testBtn === null || this.$testStatus === null) {
+    private renderProviders(): void {
+        if (this.$providersList === null) {
             return;
         }
-        this.$testBtn.prop('disabled', true);
-        this.$testStatus.html(
-            `<span class="text-muted small"><i class="fas fa-spinner fa-spin mr-1"></i>${Settings.lang('settings_jellyfin_testing')}</span>`,
+        this.$providersList.empty();
+        if (this.providers.length === 0) {
+            this.$providersList.append(jQuery<HTMLDivElement>(`
+                <div class="alert alert-info small mb-0">
+                    <i class="fas fa-info-circle mr-1"></i>${Settings.lang('settings_no_providers')}
+                </div>
+            `));
+            return;
+        }
+        for (let i = 0; i < this.providers.length; i++) {
+            const provider: LibraryProvider | undefined = this.providers[i];
+            if (provider === undefined) {
+                continue;
+            }
+            this.$providersList.append(this.renderProviderCard(provider, i));
+        }
+    }
+
+    private renderProviderCard(provider: LibraryProvider, index: number): JQuery<HTMLDivElement> {
+        if (provider.kind === 'local') {
+            return this.renderLocalCard(provider, index);
+        }
+        return this.renderJellyfinCard(provider, index);
+    }
+
+    private renderLocalCard(provider: LocalLibraryProvider, index: number): JQuery<HTMLDivElement> {
+        const $card: JQuery<HTMLDivElement> = jQuery<HTMLDivElement>(`
+            <div class="card mb-3">
+                <div class="card-header py-2 d-flex align-items-center" style="gap:0.5rem;">
+                    <span class="badge badge-info">${Settings.lang('settings_provider_local')}</span>
+                    <strong class="hbb-provider-id-display flex-grow-1">${Settings.escape(provider.id)}</strong>
+                    <button type="button" class="btn btn-sm btn-outline-danger hbb-remove-provider">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </div>
+                <div class="card-body py-2">
+                    <div class="form-row">
+                        <div class="form-group col-md-4">
+                            <label class="small mb-1">${Settings.lang('settings_provider_id')}</label>
+                            <input type="text" class="form-control form-control-sm hbb-input-id" value="${Settings.escape(provider.id)}" autocomplete="off">
+                        </div>
+                        <div class="form-group col-md-8">
+                            <label class="small mb-1">${Settings.lang('settings_local_root_dir')}</label>
+                            <input type="text" class="form-control form-control-sm hbb-input-rootdir" value="${Settings.escape(provider.rootDir)}" placeholder="/path/to/library" autocomplete="off">
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `);
+        const $idInput = $card.find<HTMLInputElement>('.hbb-input-id');
+        const $rootDirInput = $card.find<HTMLInputElement>('.hbb-input-rootdir');
+        const $idDisplay = $card.find<HTMLSpanElement>('.hbb-provider-id-display');
+        $idInput.on('input', (): void => {
+            const next: string = $idInput.val()?.toString() ?? '';
+            this.providers[index] = { ...provider, id: next };
+            $idDisplay.text(next === '' ? '—' : next);
+        });
+        $rootDirInput.on('input', (): void => {
+            this.providers[index] = { ...provider, rootDir: $rootDirInput.val()?.toString() ?? '' };
+        });
+        $card.find<HTMLButtonElement>('.hbb-remove-provider').on('click', (): void => {
+            this.providers.splice(index, 1);
+            this.renderProviders();
+        });
+        return $card;
+    }
+
+    private renderJellyfinCard(provider: JellyfinLibraryProvider, index: number): JQuery<HTMLDivElement> {
+        const $card: JQuery<HTMLDivElement> = jQuery<HTMLDivElement>(`
+            <div class="card mb-3">
+                <div class="card-header py-2 d-flex align-items-center" style="gap:0.5rem;">
+                    <span class="badge badge-purple">${Settings.lang('settings_provider_jellyfin')}</span>
+                    <strong class="hbb-provider-id-display flex-grow-1">${Settings.escape(provider.id)}</strong>
+                    <button type="button" class="btn btn-sm btn-outline-danger hbb-remove-provider">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </div>
+                <div class="card-body py-2">
+                    <div class="form-row">
+                        <div class="form-group col-md-4">
+                            <label class="small mb-1">${Settings.lang('settings_provider_id')}</label>
+                            <input type="text" class="form-control form-control-sm hbb-input-id" value="${Settings.escape(provider.id)}" autocomplete="off">
+                        </div>
+                        <div class="form-group col-md-8">
+                            <label class="small mb-1">${Settings.lang('settings_jellyfin_url')}</label>
+                            <input type="text" class="form-control form-control-sm hbb-input-url" value="${Settings.escape(provider.url)}" placeholder="http://localhost:8096" autocomplete="off">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group col-md-6">
+                            <label class="small mb-1">${Settings.lang('settings_jellyfin_user_id')}</label>
+                            <input type="text" class="form-control form-control-sm hbb-input-user-id" value="${Settings.escape(provider.userId)}" placeholder="${Settings.lang('settings_jellyfin_user_id_placeholder')}" autocomplete="off">
+                        </div>
+                        <div class="form-group col-md-6">
+                            <label class="small mb-1">${Settings.lang('settings_jellyfin_api_key')}</label>
+                            <input type="password" class="form-control form-control-sm hbb-input-api-key" value="${Settings.escape(provider.apiKey)}" autocomplete="new-password">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label class="small mb-1">${Settings.lang('settings_jellyfin_exclude_patterns')}</label>
+                        <textarea class="form-control form-control-sm hbb-input-exclude" rows="3" placeholder="${Settings.lang('settings_jellyfin_exclude_placeholder')}">${Settings.escape((provider.excludePatterns ?? []).join('\n'))}</textarea>
+                        <small class="form-text text-muted">${Settings.lang('settings_jellyfin_exclude_help')}</small>
+                    </div>
+                    <div class="d-flex align-items-center" style="gap:0.5rem;">
+                        <button type="button" class="btn btn-sm btn-secondary hbb-test-jellyfin">
+                            <i class="fas fa-plug mr-1"></i>${Settings.lang('settings_jellyfin_test')}
+                        </button>
+                        <span class="hbb-test-status small"></span>
+                    </div>
+                </div>
+            </div>
+        `);
+        const $idInput = $card.find<HTMLInputElement>('.hbb-input-id');
+        const $urlInput = $card.find<HTMLInputElement>('.hbb-input-url');
+        const $userIdInput = $card.find<HTMLInputElement>('.hbb-input-user-id');
+        const $apiKeyInput = $card.find<HTMLInputElement>('.hbb-input-api-key');
+        const $excludeInput = $card.find<HTMLTextAreaElement>('.hbb-input-exclude');
+        const $idDisplay = $card.find<HTMLSpanElement>('.hbb-provider-id-display');
+        const $testStatus = $card.find<HTMLSpanElement>('.hbb-test-status');
+        const $testBtn = $card.find<HTMLButtonElement>('.hbb-test-jellyfin');
+        const writeBack = (): void => {
+            const excludeRaw: string = $excludeInput.val()?.toString() ?? '';
+            const excludePatterns: string[] = excludeRaw
+                .split('\n')
+                .map((s: string): string => s.trim())
+                .filter((s: string): boolean => s.length > 0);
+            const next: JellyfinLibraryProvider = {
+                id: $idInput.val()?.toString() ?? '',
+                type: 'library',
+                kind: 'jellyfin',
+                url: $urlInput.val()?.toString() ?? '',
+                userId: $userIdInput.val()?.toString() ?? '',
+                apiKey: $apiKeyInput.val()?.toString() ?? '',
+            };
+            // Only include excludePatterns when non-empty so the persisted JSON
+            // stays clean (omit-when-default convention used elsewhere).
+            if (excludePatterns.length > 0) {
+                (next as { excludePatterns?: string[] }).excludePatterns = excludePatterns;
+            }
+            this.providers[index] = next;
+        };
+        $idInput.on('input', (): void => {
+            writeBack();
+            const next: string = $idInput.val()?.toString() ?? '';
+            $idDisplay.text(next === '' ? '—' : next);
+        });
+        $urlInput.on('input', writeBack);
+        $userIdInput.on('input', writeBack);
+        $excludeInput.on('input', writeBack);
+        $apiKeyInput.on('input', writeBack);
+        $testBtn.on('click', (): void => {
+            void this.runJellyfinTest(index, $testBtn, $testStatus, $userIdInput);
+        });
+        $card.find<HTMLButtonElement>('.hbb-remove-provider').on('click', (): void => {
+            this.providers.splice(index, 1);
+            this.renderProviders();
+        });
+        return $card;
+    }
+
+    private async runJellyfinTest(
+        index: number,
+        $btn: JQuery<HTMLButtonElement>,
+        $status: JQuery<HTMLSpanElement>,
+        $userIdInput: JQuery<HTMLInputElement>,
+    ): Promise<void> {
+        const provider: LibraryProvider | undefined = this.providers[index];
+        if (provider === undefined || provider.kind !== 'jellyfin') {
+            return;
+        }
+        const body: JellyfinConnection = {
+            url: provider.url.trim(),
+            apiKey: provider.apiKey.trim(),
+            userId: provider.userId.trim(),
+        };
+        $btn.prop('disabled', true);
+        $status.html(
+            `<span class="text-muted"><i class="fas fa-spinner fa-spin mr-1"></i>${Settings.lang('settings_jellyfin_testing')}</span>`,
         );
         let result: JellyfinTestResult;
         try {
-            result = await SettingsApi.testJellyfin(this.currentJellyfin());
+            result = await SettingsApi.testJellyfin(body);
         } catch (err) {
-            this.$testStatus.html(
-                `<div class="alert alert-danger py-2 px-3 mb-0 small">${
+            $status.html(
+                `<span class="text-danger">${
                     err instanceof Error ? Settings.escape(err.message) : Settings.escape(String(err))
-                }</div>`,
+                }</span>`,
             );
-            this.$testBtn.prop('disabled', false);
+            $btn.prop('disabled', false);
             return;
         }
-        this.$testBtn.prop('disabled', false);
-        const cls: string = result.ok ? 'alert-success' : 'alert-danger';
+        $btn.prop('disabled', false);
+        const cls: string = result.ok ? 'text-success' : 'text-danger';
         const icon: string = result.ok ? 'fa-check-circle' : 'fa-exclamation-triangle';
-        this.$testStatus.html(
-            `<div class="alert ${cls} py-2 px-3 mb-0 small d-flex align-items-center">
-                <i class="fas ${icon} mr-2"></i>
-                <span>${Settings.escape(result.message)}</span>
-            </div>`,
+        $status.html(
+            `<span class="${cls}"><i class="fas ${icon} mr-1"></i>${Settings.escape(result.message)}</span>`,
         );
-        // If the server resolved/discovered a user ID, populate the form so the next
+        // If the server resolved/discovered a user ID, populate the field so the next
         // Save persists exactly what was tested. Avoids the "tested fine but saved
         // empty" footgun when the user left the field blank for auto-discovery.
         if (result.ok && result.resolvedUserId !== undefined && result.resolvedUserId !== '') {
-            this.$jellyfinUserId?.val(result.resolvedUserId);
+            $userIdInput.val(result.resolvedUserId);
+            const current: LibraryProvider | undefined = this.providers[index];
+            if (current !== undefined && current.kind === 'jellyfin') {
+                this.providers[index] = { ...current, userId: result.resolvedUserId };
+            }
         }
     }
 
@@ -207,10 +333,7 @@ export class Settings extends BasePage {
         this.$saveStatus.html(
             `<span class="text-muted"><i class="fas fa-spinner fa-spin mr-1"></i>${Settings.lang('settings_saving')}</span>`,
         );
-        const body: SettingsData = {
-            librarySource: this.currentSource(),
-            jellyfin: this.currentJellyfin(),
-        };
+        const body: SettingsData = { providers: this.providers };
         try {
             await SettingsApi.save(body);
         } catch (err) {
@@ -226,6 +349,30 @@ export class Settings extends BasePage {
         this.$saveStatus.html(
             `<span class="text-success"><i class="fas fa-check-circle mr-1"></i>${Settings.lang('settings_saved')}</span>`,
         );
+    }
+
+    private static newLocalProvider(): LocalLibraryProvider {
+        return {
+            id: `local-${Settings.shortRandomId()}`,
+            type: 'library',
+            kind: 'local',
+            rootDir: '',
+        };
+    }
+
+    private static newJellyfinProvider(): JellyfinLibraryProvider {
+        return {
+            id: `jellyfin-${Settings.shortRandomId()}`,
+            type: 'library',
+            kind: 'jellyfin',
+            url: '',
+            apiKey: '',
+            userId: '',
+        };
+    }
+
+    private static shortRandomId(): string {
+        return Math.random().toString(36).slice(2, 8);
     }
 
     private static lang(key: string): string {

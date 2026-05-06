@@ -6,10 +6,12 @@ import {
     type CompatibleResponse,
     type LibraryResponse,
     type ScanStatus,
+    type TrackRef,
 } from '@headbangbear/schemas';
 
 /**
  * Wrapper around the `/api/v1/library/*` and `/api/v1/tracks/compatible` endpoints.
+ * Track lookups are scoped by `(providerId, path)` — every per-track call passes both.
  */
 export class LibraryApi {
 
@@ -21,8 +23,8 @@ export class LibraryApi {
         return NetFetch.postData('api/v1/library/rescan', {}, LibraryResponseSchema);
     }
 
-    public static async compatible(trackPath: string): Promise<CompatibleResponse> {
-        const url: string = `api/v1/tracks/compatible?path=${encodeURIComponent(trackPath)}`;
+    public static async compatible(ref: TrackRef): Promise<CompatibleResponse> {
+        const url: string = `api/v1/tracks/compatible?providerId=${encodeURIComponent(ref.providerId)}&path=${encodeURIComponent(ref.path)}`;
         return NetFetch.getData(url, CompatibleResponseSchema);
     }
 

@@ -97,6 +97,14 @@ export interface BeamSearchOptions {
      * wins. Untagged tracks never trigger the penalty. Default `false`.
      */
     avoidSameArtist?: boolean;
+    /**
+     * Optional progress callback fired once per evaluated start track in
+     * `tryAllStarts` mode (and once total when a fixed start is set). Used by
+     * the worker-thread wrapper to forward progress to the UI. The callback is
+     * called synchronously from inside the search loop; consumers that need a
+     * yield should `await new Promise(setImmediate)` from within.
+     */
+    onProgress?: (info: { current: number; total: number; phase: string }) => void;
 }
 
 /**
@@ -155,7 +163,14 @@ export class BeamSearchDjSetPlanner {
             targetDurationSec !== undefined || energyShape !== undefined;
 
         let bestState: BeamState | null = null;
-        for (const start of starts) {
+        const totalStarts: number = starts.length;
+        for (let i = 0; i < totalStarts; i++) {
+            const start = starts[i] as AnalyzedTrack;
+            options.onProgress?.({
+                current: i + 1,
+                total: totalStarts,
+                phase: 'beam-search',
+            });
             const finalState: BeamState = this.searchFromStart(
                 start,
                 beamWidth,
@@ -312,7 +327,7 @@ export class BeamSearchDjSetPlanner {
     ): TransitionPlan {
         // Cache key includes the style — different styles yield different cue points so we
         // can't share the same plan across them.
-        const key: string = `${from.path}${to.path}${style ?? 'default'}`;
+        const key: string = `${from.providerId}${from.path}${to.providerId}${to.path}${style ?? 'default'}`;
         const cached: TransitionPlan | undefined = this.transitionCache.get(key);
         if (cached !== undefined) {
             return cached;
@@ -413,6 +428,7 @@ export class BeamSearchDjSetPlanner {
 
     private static summarize(t: AnalyzedTrack): DjSetTrack {
         return {
+            providerId: t.providerId,
             path: t.path,
             camelot: t.result.camelot.toString(),
             bpm: t.result.bpm,

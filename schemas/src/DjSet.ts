@@ -19,6 +19,7 @@ export type EnergyShape = ExtractSchemaResultType<typeof EnergyShapeSchema>;
 export type DjSetStrategy = 'greedy' | 'beam';
 
 export const DjSetTrackSchema = Vts.object({
+    providerId: Vts.string(),
     path: Vts.string(),
     camelot: Vts.string(),
     bpm: Vts.number(),

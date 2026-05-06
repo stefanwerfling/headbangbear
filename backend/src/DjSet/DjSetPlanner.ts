@@ -106,6 +106,9 @@ export interface DjSetPlannerOptions {
      * artist diversity onto a myopic search doesn't move the needle. Default `false`.
      */
     avoidSameArtist?: boolean;
+    /** Forwarded to `BeamSearchDjSetPlanner` so worker wrappers can stream progress
+     *  events to the UI. Greedy ignores this — it finishes too fast to be worth tracking. */
+    onProgress?: (info: { current: number; total: number; phase: string }) => void;
 }
 
 const ENERGY_DIRECTION_PENALTY: number = 1000;
@@ -140,6 +143,7 @@ export class DjSetPlanner {
                 targetDurationSec: options.targetDurationSec,
                 style: options.style,
                 avoidSameArtist: options.avoidSameArtist,
+                onProgress: options.onProgress,
             });
         }
 
@@ -329,6 +333,7 @@ export class DjSetPlanner {
 
     private static summarize(t: AnalyzedTrack): DjSetTrack {
         return {
+            providerId: t.providerId,
             path: t.path,
             camelot: t.result.camelot.toString(),
             bpm: t.result.bpm,

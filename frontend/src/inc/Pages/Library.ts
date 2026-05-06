@@ -7,12 +7,12 @@ import {
     Lang,
     LangText,
     Table,
-    Td,
     Th,
     Tr
 } from 'bambooo';
 import { LibraryApi } from '../Api/LibraryApi.js';
 import { MixApi } from '../Api/MixApi.js';
+import { TracksApi } from '../Api/TracksApi.js';
 import {
     type DjSet,
     type LibraryResponse,
@@ -104,6 +104,22 @@ export class Library extends BasePage {
 
     private lastRenderedCount: number = 0;
 
+    /** Full track list from `/api/library/list`. Filter / sort produce
+     *  `filteredTracks` from this; the rendered DOM is a slice of that. */
+    private allTracks: RouteTrack[] = [];
+
+    /** Subset of `allTracks` matching the current filters in current sort
+     *  order. The DOM only contains the first `renderedRowCount` of these —
+     *  the rest are appended on scroll. */
+    private filteredTracks: RouteTrack[] = [];
+
+    /** How many of `filteredTracks` are currently in the DOM. */
+    private renderedRowCount: number = 0;
+
+    private static readonly RENDER_CHUNK_SIZE: number = 100;
+
+    private scrollHandler: ((e: Event) => void) | null = null;
+
     public constructor() {
         super();
         this.setTitle(new LangText('library'));
@@ -121,6 +137,10 @@ export class Library extends BasePage {
         if (this.keydownHandler !== null) {
             window.removeEventListener('keydown', this.keydownHandler);
             this.keydownHandler = null;
+        }
+        if (this.scrollHandler !== null) {
+            window.removeEventListener('scroll', this.scrollHandler);
+            this.scrollHandler = null;
         }
         this.stopScanPolling();
     }
@@ -409,9 +429,10 @@ export class Library extends BasePage {
             this.$scanBanner.removeClass('alert-success alert-danger').addClass('alert-info');
             $titleIcon.removeClass('fa-check-circle fa-exclamation-triangle').addClass('fa-sync-alt fa-spin');
             $title.contents().last().replaceWith(` ${Library.lang('library_scan_banner_title')}`);
+            const providerLabel: string = Library.formatProviderProgress(status);
             const detail: string = `${Library.lang('library_scan_banner_progress')}: `
                 + `${status.current.toString()} / ${status.total.toString()} `
-                + `(${status.librarySource}) — ${status.currentName}`
+                + `${providerLabel} — ${status.currentName}`
                 + (status.currentPhase !== undefined ? ` [${status.currentPhase}]` : '');
             $detail.text(detail);
             const pct: number = status.total > 0 ? (status.current / status.total) * 100 : 0;
@@ -422,7 +443,7 @@ export class Library extends BasePage {
             $titleIcon.removeClass('fa-sync-alt fa-spin fa-exclamation-triangle').addClass('fa-check-circle');
             $title.contents().last().replaceWith(` ${Library.lang('library_scan_banner_done')}`);
             $detail.text(
-                `${status.current.toString()} / ${status.total.toString()} (${status.librarySource})`,
+                `${status.current.toString()} / ${status.total.toString()} ${Library.formatProviderProgress(status)}`,
             );
             $bar.css('width', '100%');
             // Auto-hide after a short victory lap.
@@ -554,63 +575,10 @@ export class Library extends BasePage {
                 }
             });
 
-        let rowIndex: number = 0;
-        for (const track of library.tracks) {
-            const trbody = new Tr(table.getTbody());
-            const filename: string = TrackDisplayUtil.filenameOf(track.path);
-            const searchHaystack: string = TrackDisplayUtil.buildSearchHaystack(track, filename);
-            const meta = track.metadata;
-            const sortTrack: string = (meta?.title ?? filename).toLowerCase();
-            trbody.getElement()
-                .attr('data-filename', searchHaystack)
-                .attr('data-camelot', track.camelot)
-                .attr('data-bpm', track.bpm.toString())
-                .attr('data-energy', track.energy.toString())
-                .attr('data-year', meta?.year !== undefined ? meta.year.toString() : '')
-                .attr('data-genre', meta?.genre ?? '')
-                .attr('data-drops', track.drops.length.toString())
-                .attr('data-sort-track', sortTrack)
-                .attr('data-original-index', rowIndex.toString());
-            rowIndex += 1;
-            // eslint-disable-next-line no-new
-            new Td(trbody, TrackDisplayUtil.coverThumbHtml(track));
-            // eslint-disable-next-line no-new
-            new Td(trbody, TrackDisplayUtil.trackCellHtml(track, filename));
-            // eslint-disable-next-line no-new
-            new Td(trbody, `<span class="badge badge-info">${track.camelot}</span>`);
-            // eslint-disable-next-line no-new
-            new Td(trbody, track.openKey);
-            // eslint-disable-next-line no-new
-            new Td(trbody, track.bpm.toFixed(1));
-            // eslint-disable-next-line no-new
-            new Td(trbody, track.energy.toFixed(3));
-            // eslint-disable-next-line no-new
-            new Td(trbody, track.drops.length === 0 ? '—' : track.drops.length.toString());
-
-            const actionTd = new Td(trbody, '');
-            const $actions = jQuery<HTMLSpanElement>(`
-                <span>
-                    <button type="button" class="btn btn-xs btn-info mr-1" data-deck="A">→ A</button>
-                    <button type="button" class="btn btn-xs btn-success" data-deck="B">→ B</button>
-                </span>
-            `);
-            $actions.find('button').on('click', (e: JQuery.ClickEvent): void => {
-                const deck: string = jQuery(e.currentTarget).attr('data-deck') ?? 'A';
-                if (deck === 'A') {
-                    this.deckA?.setTrack(track);
-                    this.currentFromTrack = track;
-                    this.updateCompatibleDeckLabel();
-                    this.applyTableFilters();
-                } else {
-                    this.deckB?.setTrack(track);
-                    this.currentToTrack = track;
-                }
-                this.currentPlan = null;
-                this.refreshPlanMixState();
-                this.refreshTransitionButtons();
-            });
-            actionTd.getElement().append($actions);
-        }
+        // Stash the full set; chunked rendering pulls from `filteredTracks` (a
+        // filter+sort transform of `allTracks`) on demand.
+        this.allTracks = library.tracks;
+        this.installInfiniteScroll();
 
         // Wire search + compatible-only filters; all run through `applyTableFilters`.
         this.$searchInput.on('input', (): void => {
@@ -663,42 +631,43 @@ export class Library extends BasePage {
         const yearMin: number = Library.parseBound(this.$yearMin?.val()?.toString(), 0);
         const yearMax: number = Library.parseBound(this.$yearMax?.val()?.toString(), Number.POSITIVE_INFINITY);
         const genreFilter: string = this.$genreSelect?.val()?.toString() ?? '';
-        let visible: number = 0;
-        let total: number = 0;
-        this.$tracksTbody.find<HTMLTableRowElement>('tr[data-filename]').each(
-            (_idx, row): void => {
-                total += 1;
-                const $row = jQuery(row);
-                const filename: string = $row.attr('data-filename') ?? '';
-                const camelot: string = $row.attr('data-camelot') ?? '';
-                const bpm: number = Number.parseFloat($row.attr('data-bpm') ?? '0');
-                const energy: number = Number.parseFloat($row.attr('data-energy') ?? '0');
-                const yearRaw: string = $row.attr('data-year') ?? '';
-                const year: number = yearRaw === '' ? Number.NaN : Number.parseFloat(yearRaw);
-                const genre: string = $row.attr('data-genre') ?? '';
-                const matchesSearch: boolean = q === '' || filename.includes(q);
-                const matchesCompat: boolean =
-                    !compatOn || deckACamelot === null
-                        ? true
-                        : CamelotUtil.isCompatible(deckACamelot, camelot);
-                const matchesBpm: boolean = bpm >= bpmMin && bpm <= bpmMax;
-                const matchesEnergy: boolean = energy >= energyMin && energy <= energyMax;
-                // Tracks without a year are only filtered out when the user actively constrained
-                // the range (otherwise an empty range silently drops untagged tracks).
-                const yearActive: boolean = yearMin > 0 || yearMax !== Number.POSITIVE_INFINITY;
-                const matchesYear: boolean = !yearActive
-                    || (Number.isFinite(year) && year >= yearMin && year <= yearMax);
-                const matchesGenre: boolean = genreFilter === '' || genre === genreFilter;
-                const show: boolean = matchesSearch && matchesCompat && matchesBpm
-                    && matchesEnergy && matchesYear && matchesGenre;
-                $row.toggle(show);
-                if (show) {
-                    visible += 1;
-                }
-            }
-        );
+        const yearActive: boolean = yearMin > 0 || yearMax !== Number.POSITIVE_INFINITY;
+        // Filter the JS array (not the DOM) so we can later render only a
+        // chunk and still know how many matches exist in total.
+        this.filteredTracks = this.allTracks.filter((t: RouteTrack): boolean => {
+            const filename: string = TrackDisplayUtil.filenameOf(t.path);
+            const haystack: string = TrackDisplayUtil.buildSearchHaystack(t, filename);
+            const matchesSearch: boolean = q === '' || haystack.includes(q);
+            // Compatibility filter implicitly hides disabled tracks — they're
+            // never going to be valid mix candidates anyway. When the toggle
+            // is off, disabled stays visible (greyed out) so the user can
+            // re-enable.
+            const matchesCompat: boolean =
+                !compatOn || deckACamelot === null
+                    ? true
+                    : !t.disabled && CamelotUtil.isCompatible(deckACamelot, t.camelot);
+            const matchesBpm: boolean = t.bpm >= bpmMin && t.bpm <= bpmMax;
+            const matchesEnergy: boolean = t.energy >= energyMin && t.energy <= energyMax;
+            const year: number | undefined = t.metadata?.year;
+            const matchesYear: boolean = !yearActive
+                || (year !== undefined && year >= yearMin && year <= yearMax);
+            const genre: string = t.metadata?.genre ?? '';
+            const matchesGenre: boolean = genreFilter === '' || genre === genreFilter;
+            return matchesSearch && matchesCompat && matchesBpm
+                && matchesEnergy && matchesYear && matchesGenre;
+        });
+        this.applySortToFiltered();
+        // Reset the DOM and render the first chunk. Subsequent chunks come
+        // through `renderMoreRows` on scroll.
+        this.$tracksTbody.empty();
+        this.renderedRowCount = 0;
+        this.renderMoreRows();
         if (this.$filterCount !== null) {
-            this.$filterCount.text(visible === total ? '' : `${visible.toString()} / ${total.toString()}`);
+            const visible: number = this.filteredTracks.length;
+            const total: number = this.allTracks.length;
+            this.$filterCount.text(
+                visible === total ? '' : `${visible.toString()} / ${total.toString()}`,
+            );
         }
     }
 
@@ -742,42 +711,191 @@ export class Library extends BasePage {
         } else {
             this.sortKey = null;
         }
-        this.applySort();
+        // Sort runs against the JS array, then we wipe the DOM and re-render
+        // the first chunk so the sort takes effect on what the user sees.
+        this.applySortToFiltered();
+        if (this.$tracksTbody !== null) {
+            this.$tracksTbody.empty();
+            this.renderedRowCount = 0;
+            this.renderMoreRows();
+        }
         this.refreshSortIndicators();
     }
 
-    private applySort(): void {
+    /** Sort `filteredTracks` in place per the current `sortKey` / `sortDir`.
+     *  Called by the filter pipeline AND `cycleSort` — keeps the array aligned
+     *  with what the chunked renderer reads. */
+    private applySortToFiltered(): void {
+        if (this.sortKey === null) {
+            // Restore original `allTracks` order while keeping the filter set.
+            const positions: Map<RouteTrack, number> = new Map();
+            this.allTracks.forEach((t: RouteTrack, idx: number): void => {
+                positions.set(t, idx);
+            });
+            this.filteredTracks.sort((a: RouteTrack, b: RouteTrack): number =>
+                (positions.get(a) ?? 0) - (positions.get(b) ?? 0),
+            );
+            return;
+        }
+        const dir: number = this.sortDir === 'asc' ? 1 : -1;
+        const key: string = this.sortKey;
+        this.filteredTracks.sort((a: RouteTrack, b: RouteTrack): number => {
+            if (key === 'bpm') {
+                return (a.bpm - b.bpm) * dir;
+            }
+            if (key === 'energy') {
+                return (a.energy - b.energy) * dir;
+            }
+            if (key === 'drops') {
+                return (a.drops.length - b.drops.length) * dir;
+            }
+            if (key === 'camelot') {
+                return a.camelot.localeCompare(b.camelot) * dir;
+            }
+            // 'sort-track' — title falling back to filename, lower-cased
+            const at: string = (a.metadata?.title ?? TrackDisplayUtil.filenameOf(a.path)).toLowerCase();
+            const bt: string = (b.metadata?.title ?? TrackDisplayUtil.filenameOf(b.path)).toLowerCase();
+            return at.localeCompare(bt) * dir;
+        });
+    }
+
+    /** Append the next `RENDER_CHUNK_SIZE` rows from `filteredTracks` to the
+     *  DOM. Called on initial render after filter, and on scroll once the user
+     *  is close to the bottom. */
+    private renderMoreRows(): void {
         if (this.$tracksTbody === null) {
             return;
         }
-        const $rows = this.$tracksTbody.find<HTMLTableRowElement>('tr[data-filename]');
-        if (this.sortKey === null) {
-            // Restore original DOM order via the row indices we baked in at render time.
-            const reordered: HTMLTableRowElement[] = [...$rows.toArray()].sort(
-                (a, b): number => Library.attrAsNumber(a, 'data-original-index')
-                    - Library.attrAsNumber(b, 'data-original-index'),
-            );
-            for (const row of reordered) {
-                this.$tracksTbody[0]?.appendChild(row);
-            }
+        const tbody: HTMLTableSectionElement | undefined = this.$tracksTbody[0];
+        if (tbody === undefined) {
             return;
         }
-        const numericKey: boolean = this.sortKey === 'bpm'
-            || this.sortKey === 'energy'
-            || this.sortKey === 'drops';
-        const attr: string = `data-${this.sortKey}`;
-        const dir: number = this.sortDir === 'asc' ? 1 : -1;
-        const sorted: HTMLTableRowElement[] = [...$rows.toArray()].sort((a, b): number => {
-            const av: string = a.getAttribute(attr) ?? '';
-            const bv: string = b.getAttribute(attr) ?? '';
-            if (numericKey) {
-                return (Number.parseFloat(av) - Number.parseFloat(bv)) * dir;
+        const end: number = Math.min(
+            this.renderedRowCount + Library.RENDER_CHUNK_SIZE,
+            this.filteredTracks.length,
+        );
+        for (let i = this.renderedRowCount; i < end; i++) {
+            const track: RouteTrack | undefined = this.filteredTracks[i];
+            if (track === undefined) {
+                continue;
             }
-            return av.localeCompare(bv) * dir;
-        });
-        for (const row of sorted) {
-            this.$tracksTbody[0]?.appendChild(row);
+            tbody.appendChild(this.buildRow(track));
         }
+        this.renderedRowCount = end;
+    }
+
+    /** One Tr DOM node for a single track. Extracted from the old per-track
+     *  build loop. The row carries no `data-*` attributes (filter / sort now
+     *  operate on the JS array, not the DOM), but it does get the
+     *  `hbb-track-disabled` class when the track is soft-disabled. */
+    private buildRow(track: RouteTrack): HTMLTableRowElement {
+        const filename: string = TrackDisplayUtil.filenameOf(track.path);
+        const tr: HTMLTableRowElement = document.createElement('tr');
+        if (track.disabled) {
+            tr.className = 'hbb-track-disabled text-muted';
+        }
+        const td = (html: string): HTMLTableCellElement => {
+            const c: HTMLTableCellElement = document.createElement('td');
+            c.innerHTML = html;
+            return c;
+        };
+        tr.appendChild(td(TrackDisplayUtil.coverThumbHtml(track)));
+        tr.appendChild(td(TrackDisplayUtil.trackCellHtml(track, filename)));
+        tr.appendChild(td(`<span class="badge badge-info">${track.camelot}</span>`));
+        tr.appendChild(td(track.openKey));
+        tr.appendChild(td(track.bpm.toFixed(1)));
+        tr.appendChild(td(track.energy.toFixed(3)));
+        tr.appendChild(td(track.drops.length === 0 ? '—' : track.drops.length.toString()));
+
+        const actionTd: HTMLTableCellElement = document.createElement('td');
+        const disabledIcon: string = track.disabled ? 'fa-toggle-off' : 'fa-toggle-on';
+        const disabledTitle: string = track.disabled
+            ? Library.lang('library_track_enable')
+            : Library.lang('library_track_disable');
+        actionTd.innerHTML = `
+            <span>
+                <button type="button" class="btn btn-xs btn-info mr-1" data-deck="A">→ A</button>
+                <button type="button" class="btn btn-xs btn-success mr-1" data-deck="B">→ B</button>
+                <button type="button" class="btn btn-xs btn-default hbb-toggle-disabled" title="${disabledTitle}">
+                    <i class="fas ${disabledIcon}"></i>
+                </button>
+            </span>
+        `;
+        const $actions = jQuery(actionTd);
+        $actions.find<HTMLButtonElement>('button[data-deck]').on('click', (e: JQuery.ClickEvent): void => {
+            const deck: string = jQuery(e.currentTarget).attr('data-deck') ?? 'A';
+            if (deck === 'A') {
+                this.deckA?.setTrack(track);
+                this.currentFromTrack = track;
+                this.updateCompatibleDeckLabel();
+                this.applyTableFilters();
+            } else {
+                this.deckB?.setTrack(track);
+                this.currentToTrack = track;
+            }
+            this.currentPlan = null;
+            this.refreshPlanMixState();
+            this.refreshTransitionButtons();
+        });
+        $actions.find<HTMLButtonElement>('.hbb-toggle-disabled').on('click', (): void => {
+            void this.toggleTrackDisabled(track, tr);
+        });
+        tr.appendChild(actionTd);
+        return tr;
+    }
+
+    /** Flip the soft-disable flag on a track. Optimistic UI: greyed-out class
+     *  toggled immediately, the POST happens in the background. On failure we
+     *  revert and surface the error. */
+    private async toggleTrackDisabled(track: RouteTrack, row: HTMLTableRowElement): Promise<void> {
+        const previous: boolean = track.disabled;
+        const next: boolean = !previous;
+        track.disabled = next;
+        row.classList.toggle('hbb-track-disabled', next);
+        row.classList.toggle('text-muted', next);
+        const $btn = jQuery(row).find<HTMLElement>('.hbb-toggle-disabled i');
+        $btn.removeClass('fa-toggle-on fa-toggle-off')
+            .addClass(next ? 'fa-toggle-off' : 'fa-toggle-on');
+        try {
+            await TracksApi.setDisabled({
+                providerId: track.providerId,
+                path: track.path,
+                disabled: next,
+            });
+        } catch (err) {
+            console.error('Library: setDisabled failed, reverting:', err);
+            track.disabled = previous;
+            row.classList.toggle('hbb-track-disabled', previous);
+            row.classList.toggle('text-muted', previous);
+            $btn.removeClass('fa-toggle-on fa-toggle-off')
+                .addClass(previous ? 'fa-toggle-off' : 'fa-toggle-on');
+        }
+    }
+
+    /** Window scroll listener — when the user scrolls within 500 px of the
+     *  bottom of the table and there are unrendered rows, append the next
+     *  chunk. Idempotent / cheap (a couple of getBoundingClientRect calls). */
+    private installInfiniteScroll(): void {
+        if (this.scrollHandler !== null) {
+            window.removeEventListener('scroll', this.scrollHandler);
+        }
+        this.scrollHandler = (): void => {
+            if (this.$tracksTbody === null) {
+                return;
+            }
+            if (this.renderedRowCount >= this.filteredTracks.length) {
+                return;
+            }
+            const tbody: HTMLTableSectionElement | undefined = this.$tracksTbody[0];
+            if (tbody === undefined) {
+                return;
+            }
+            const rect: DOMRect = tbody.getBoundingClientRect();
+            if (rect.bottom - window.innerHeight < 500) {
+                this.renderMoreRows();
+            }
+        };
+        window.addEventListener('scroll', this.scrollHandler, { passive: true });
     }
 
     private refreshSortIndicators(): void {
@@ -798,14 +916,6 @@ export class Library extends BasePage {
         });
     }
 
-    private static attrAsNumber(row: HTMLTableRowElement, attr: string): number {
-        const raw: string | null = row.getAttribute(attr);
-        if (raw === null) {
-            return Number.MAX_SAFE_INTEGER;
-        }
-        const parsed: number = Number.parseFloat(raw);
-        return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
-    }
 
     private setActiveDeck(letter: 'A' | 'B'): void {
         this.activeDeck = letter;
@@ -962,7 +1072,11 @@ export class Library extends BasePage {
         $summary.text(`${Lang.i().l('loading') ?? 'Loading…'}`);
         let plan: TransitionPlan;
         try {
-            plan = await MixApi.plan(a.path, b.path, TransitionStyleStore.getInstance().get());
+            plan = await MixApi.plan(
+                { providerId: a.providerId, path: a.path },
+                { providerId: b.providerId, path: b.path },
+                TransitionStyleStore.getInstance().get(),
+            );
         } catch (err) {
             $summary.text(`Plan failed: ${err instanceof Error ? err.message : String(err)}`);
             return;
@@ -1006,6 +1120,7 @@ export class Library extends BasePage {
         const djSet: DjSet = {
             tracks: [
                 {
+                    providerId: this.currentFromTrack.providerId,
                     path: this.currentFromTrack.path,
                     camelot: this.currentFromTrack.camelot,
                     bpm: this.currentFromTrack.bpm,
@@ -1013,6 +1128,7 @@ export class Library extends BasePage {
                     durationSec: this.currentFromTrack.durationSec
                 },
                 {
+                    providerId: this.currentToTrack.providerId,
                     path: this.currentToTrack.path,
                     camelot: this.currentToTrack.camelot,
                     bpm: this.currentToTrack.bpm,
@@ -1077,6 +1193,19 @@ export class Library extends BasePage {
 
     private static lang(key: string): string {
         return Lang.i().l(key) ?? key;
+    }
+
+    /** Banner sub-label for the active scan: `"(provider 2/3: my-music)"` when there's more
+     *  than one provider configured, just `"(my-music)"` otherwise. Returns `''` for the
+     *  pre-first-scan idle state where no provider is active yet. */
+    private static formatProviderProgress(status: ScanStatus): string {
+        if (status.currentProviderId === '' && status.providerCount === 0) {
+            return '';
+        }
+        if (status.providerCount > 1) {
+            return `(provider ${status.providerIndex.toString()}/${status.providerCount.toString()}: ${status.currentProviderId})`;
+        }
+        return `(${status.currentProviderId})`;
     }
 
 }

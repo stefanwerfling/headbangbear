@@ -1,18 +1,22 @@
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { DataSource, Repository } from 'typeorm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Camelot } from '../../src/Analysis/Camelot.js';
 import { OpenKey } from '../../src/Analysis/OpenKey.js';
 import type { AnalysisResult } from '../../src/Analysis/schemas.js';
+import { TrackMetadataEntity } from '../../src/Database/Entity/TrackMetadataEntity.js';
 import type { AnalyzedTrack } from '../../src/Library/TrackLibrary.js';
 import { CoverArtCache } from '../../src/Metadata/CoverArtCache.js';
 import { LibraryMetadataEnricher } from '../../src/Metadata/LibraryMetadataEnricher.js';
 import { StubMetadataExtractor } from '../../src/Metadata/StubMetadataExtractor.js';
-import { TrackMetadataCache } from '../../src/Metadata/TrackMetadataCache.js';
 import type { ExtractedMetadata } from '../../src/Metadata/TrackMetadataExtractor.js';
+import { createInMemoryDataSource } from '../helpers/testDataSource.js';
 
-function makeAnalyzedTrack(path: string): AnalyzedTrack {
+const PROVIDER_ID: string = 'test-local';
+
+function makeAnalyzedTrack(relPath: string): AnalyzedTrack {
     const camelot: Camelot = Camelot.fromKey({ tonic: 'A', mode: 'minor' });
     const openKey: OpenKey = OpenKey.fromCamelot(camelot);
     const result: AnalysisResult = {
@@ -26,59 +30,68 @@ function makeAnalyzedTrack(path: string): AnalyzedTrack {
         energyTimeline: [],
         drops: [],
     };
-    return { path: path, result: result, hasCover: false };
+    return { providerId: PROVIDER_ID, path: relPath, result: result, hasCover: false, disabled: false };
 }
 
 describe('LibraryMetadataEnricher', (): void => {
     let dir: string;
-    let cachePath: string;
+    let coverDir: string;
     let coverCache: CoverArtCache;
-    let metadataCache: TrackMetadataCache;
+    let ds: DataSource;
+    let metaRepo: Repository<TrackMetadataEntity>;
 
     beforeEach(async (): Promise<void> => {
         dir = await fs.mkdtemp(join(tmpdir(), 'hbb-enricher-'));
-        cachePath = join(dir, '.metadata-cache.json');
-        coverCache = new CoverArtCache(dir);
-        metadataCache = new TrackMetadataCache(cachePath);
+        coverDir = join(dir, '.covers');
+        coverCache = new CoverArtCache(coverDir);
+        ds = await createInMemoryDataSource();
+        metaRepo = ds.getRepository(TrackMetadataEntity);
     });
 
     afterEach(async (): Promise<void> => {
+        await ds.destroy();
         await fs.rm(dir, { recursive: true, force: true });
     });
 
-    it('attaches metadata + hasCover to tracks and persists the cache', async (): Promise<void> => {
-        const aPath: string = join(dir, 'a.mp3');
-        await fs.writeFile(aPath, Buffer.alloc(64));
-        const track: AnalyzedTrack = makeAnalyzedTrack(aPath);
+    function newEnricher(extractor: StubMetadataExtractor): LibraryMetadataEnricher {
+        return new LibraryMetadataEnricher(
+            PROVIDER_ID,
+            dir,
+            extractor,
+            coverCache,
+            metaRepo,
+        );
+    }
+
+    it('attaches metadata + hasCover to tracks and persists the row', async (): Promise<void> => {
+        const aRel: string = 'a.mp3';
+        await fs.writeFile(join(dir, aRel), Buffer.alloc(64));
+        const track: AnalyzedTrack = makeAnalyzedTrack(aRel);
 
         const stub: StubMetadataExtractor = new StubMetadataExtractor();
         const response: ExtractedMetadata = {
             metadata: { artist: 'A', title: 'T' },
             cover: { mime: 'image/jpeg', data: new Uint8Array([1, 2, 3]) },
         };
-        stub.set(aPath, response);
+        stub.set(join(dir, aRel), response);
 
-        const enricher: LibraryMetadataEnricher = new LibraryMetadataEnricher(
-            stub,
-            coverCache,
-            metadataCache,
-        );
-        await enricher.enrich([track]);
+        await newEnricher(stub).enrich([track]);
 
         expect(track.metadata).toEqual({ artist: 'A', title: 'T' });
         expect(track.hasCover).toBe(true);
 
-        const cover: string | null = await coverCache.coverPath(aPath);
+        const cover: string | null = await coverCache.coverPath(aRel);
         expect(cover).not.toBeNull();
-        const cached = await metadataCache.loadEntries();
-        expect(cached.size).toBe(1);
-        expect(cached.get(aPath)?.hasCover).toBe(true);
+        const stored: TrackMetadataEntity[] = await metaRepo.find();
+        expect(stored).toHaveLength(1);
+        expect(stored[0]?.hasCover).toBe(true);
+        expect(stored[0]?.artist).toBe('A');
     });
 
-    it('reuses the cache on a second run when mtime+size unchanged', async (): Promise<void> => {
-        const aPath: string = join(dir, 'a.mp3');
-        await fs.writeFile(aPath, Buffer.alloc(64));
-        const track: AnalyzedTrack = makeAnalyzedTrack(aPath);
+    it('reuses the DB row on a second run without re-extracting', async (): Promise<void> => {
+        const aRel: string = 'a.mp3';
+        const aAbs: string = join(dir, aRel);
+        await fs.writeFile(aAbs, Buffer.alloc(64));
 
         let extractCount: number = 0;
         const extractor: StubMetadataExtractor = new StubMetadataExtractor();
@@ -87,100 +100,77 @@ describe('LibraryMetadataEnricher', (): void => {
             extractCount += 1;
             return original(path);
         };
-        extractor.set(aPath, { metadata: { title: 'X' }, cover: null });
+        extractor.set(aAbs, { metadata: { title: 'X' }, cover: null });
 
-        await new LibraryMetadataEnricher(extractor, coverCache, metadataCache).enrich([track]);
+        const track: AnalyzedTrack = makeAnalyzedTrack(aRel);
+        await newEnricher(extractor).enrich([track]);
         expect(extractCount).toBe(1);
 
-        const track2: AnalyzedTrack = makeAnalyzedTrack(aPath);
-        await new LibraryMetadataEnricher(extractor, coverCache, metadataCache).enrich([track2]);
-
-        // Second call should hit the cache and not invoke the extractor again.
+        const track2: AnalyzedTrack = makeAnalyzedTrack(aRel);
+        await newEnricher(extractor).enrich([track2]);
         expect(extractCount).toBe(1);
         expect(track2.metadata).toEqual({ title: 'X' });
     });
 
-    it('re-extracts when the file mtime changes', async (): Promise<void> => {
-        const aPath: string = join(dir, 'a.mp3');
-        await fs.writeFile(aPath, Buffer.alloc(64));
+    it('re-extracts when the existing metadata row is missing', async (): Promise<void> => {
+        const aRel: string = 'a.mp3';
+        const aAbs: string = join(dir, aRel);
+        await fs.writeFile(aAbs, Buffer.alloc(64));
 
         const extractor: StubMetadataExtractor = new StubMetadataExtractor();
-        extractor.set(aPath, { metadata: { title: 'V1' }, cover: null });
+        extractor.set(aAbs, { metadata: { title: 'V1' }, cover: null });
 
-        await new LibraryMetadataEnricher(
-            extractor,
-            coverCache,
-            metadataCache,
-        ).enrich([makeAnalyzedTrack(aPath)]);
+        await newEnricher(extractor).enrich([makeAnalyzedTrack(aRel)]);
 
-        // Mutate file: change mtime by rewriting (size stays the same but mtimeMs ticks).
-        await new Promise<void>((resolve): void => {
-            setTimeout(resolve, 10);
-        });
-        await fs.writeFile(aPath, Buffer.alloc(64));
+        // Simulate the analysis upsert dropping the metadata row (file changed):
+        await metaRepo.delete({ providerId: PROVIDER_ID, sourceId: aRel });
 
-        extractor.set(aPath, { metadata: { title: 'V2' }, cover: null });
-        const next: AnalyzedTrack = makeAnalyzedTrack(aPath);
-        await new LibraryMetadataEnricher(extractor, coverCache, metadataCache).enrich([next]);
+        extractor.set(aAbs, { metadata: { title: 'V2' }, cover: null });
+        const next: AnalyzedTrack = makeAnalyzedTrack(aRel);
+        await newEnricher(extractor).enrich([next]);
 
         expect(next.metadata).toEqual({ title: 'V2' });
     });
 
-    it('clears the cover cache when a previously-covered entry becomes stale', async (): Promise<void> => {
-        const aPath: string = join(dir, 'a.mp3');
-        await fs.writeFile(aPath, Buffer.alloc(64));
-
-        const extractor: StubMetadataExtractor = new StubMetadataExtractor();
-        extractor.set(aPath, {
-            metadata: { title: 'V1' },
-            cover: { mime: 'image/jpeg', data: new Uint8Array([1]) },
-        });
-
-        await new LibraryMetadataEnricher(
-            extractor,
-            coverCache,
-            metadataCache,
-        ).enrich([makeAnalyzedTrack(aPath)]);
-        expect(await coverCache.coverPath(aPath)).not.toBeNull();
-
-        // Mutate the file so the cache entry goes stale, and the new extraction returns no
-        // cover. The previously-written cover file must be removed.
-        await new Promise<void>((resolve): void => {
-            setTimeout(resolve, 10);
-        });
-        await fs.writeFile(aPath, Buffer.alloc(128));
-        extractor.set(aPath, { metadata: { title: 'V2' }, cover: null });
-
-        const next: AnalyzedTrack = makeAnalyzedTrack(aPath);
-        await new LibraryMetadataEnricher(extractor, coverCache, metadataCache).enrich([next]);
-
-        expect(next.hasCover).toBe(false);
-        expect(await coverCache.coverPath(aPath)).toBeNull();
-    });
-
-    it('records an empty entry when extraction throws (does not abort the scan)', async (): Promise<void> => {
-        const aPath: string = join(dir, 'a.mp3');
-        const bPath: string = join(dir, 'b.mp3');
-        await fs.writeFile(aPath, Buffer.alloc(64));
-        await fs.writeFile(bPath, Buffer.alloc(64));
+    it('records an empty row when extraction throws (does not abort)', async (): Promise<void> => {
+        const aRel: string = 'a.mp3';
+        const bRel: string = 'b.mp3';
+        const aAbs: string = join(dir, aRel);
+        const bAbs: string = join(dir, bRel);
+        await fs.writeFile(aAbs, Buffer.alloc(64));
+        await fs.writeFile(bAbs, Buffer.alloc(64));
 
         const failing: StubMetadataExtractor = new StubMetadataExtractor();
-        // a.mp3 throws; b.mp3 returns a real response
         const original: typeof failing.extract = failing.extract.bind(failing);
         failing.extract = async (path: string): Promise<ExtractedMetadata> => {
-            if (path === aPath) {
+            if (path === aAbs) {
                 throw new Error('bad file');
             }
             return original(path);
         };
-        failing.set(bPath, { metadata: { title: 'B' }, cover: null });
+        failing.set(bAbs, { metadata: { title: 'B' }, cover: null });
 
-        const trackA: AnalyzedTrack = makeAnalyzedTrack(aPath);
-        const trackB: AnalyzedTrack = makeAnalyzedTrack(bPath);
-        await new LibraryMetadataEnricher(failing, coverCache, metadataCache).enrich([trackA, trackB]);
+        const trackA: AnalyzedTrack = makeAnalyzedTrack(aRel);
+        const trackB: AnalyzedTrack = makeAnalyzedTrack(bRel);
+        await newEnricher(failing).enrich([trackA, trackB]);
 
-        expect(trackA.metadata).toEqual({});
+        expect(trackA.metadata).toBeUndefined();
         expect(trackA.hasCover).toBe(false);
         expect(trackB.metadata).toEqual({ title: 'B' });
+    });
+
+    it('skips tracks whose providerId is not the enricher\'s', async (): Promise<void> => {
+        const aRel: string = 'a.mp3';
+        await fs.writeFile(join(dir, aRel), Buffer.alloc(64));
+
+        const extractor: StubMetadataExtractor = new StubMetadataExtractor();
+        extractor.set(join(dir, aRel), { metadata: { title: 'T' }, cover: null });
+
+        const foreign: AnalyzedTrack = { ...makeAnalyzedTrack(aRel), providerId: 'other-provider' };
+        await newEnricher(extractor).enrich([foreign]);
+
+        expect(foreign.metadata).toBeUndefined();
+        const rows: TrackMetadataEntity[] = await metaRepo.find();
+        expect(rows).toHaveLength(0);
     });
 });

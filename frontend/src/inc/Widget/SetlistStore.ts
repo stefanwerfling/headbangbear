@@ -93,7 +93,7 @@ export class SetlistStore {
             if (cur === undefined || next === undefined) {
                 return false;
             }
-            if (cur.to.path !== next.from.path) {
+            if (cur.to.providerId !== next.from.providerId || cur.to.path !== next.from.path) {
                 return false;
             }
         }
@@ -123,6 +123,7 @@ export class SetlistStore {
 
     private static toDjSetTrack(t: RouteTrack): DjSetTrack {
         return {
+            providerId: t.providerId,
             path: t.path,
             camelot: t.camelot,
             bpm: t.bpm,
@@ -152,27 +153,27 @@ export class SetlistStore {
         } catch {
             return;
         }
-        // Backfill schema fields that older setlist payloads couldn't have written. `hasCover`
-        // landed in Iter 38 — without this migration step every user with a saved setlist
-        // would lose it on upgrade. Mutating in place is fine; the parsed object is private
-        // to this load.
-        SetlistStore.migrateLegacyPayload(parsed);
-        if (!PersistedSetlistSchema.validate(parsed, [])) {
-            // Still doesn't match — drop it silently rather than surface a confusing error.
+        // Per-entry migration + filter. `hasCover` is backfillable (false is a safe default —
+        // Iter 38 added it). `providerId` is NOT backfillable — there's no sane default in a
+        // multi-provider world, so any pre-Iter-52 entry without it is dropped. Filtering
+        // per-entry rather than wholesale lets a partly-valid list survive the upgrade.
+        const survivors: unknown[] = SetlistStore.migrateLegacyPayload(parsed);
+        if (!PersistedSetlistSchema.validate(survivors, [])) {
             window.localStorage.removeItem(STORAGE_KEY);
             return;
         }
-        this.entries = parsed.map((e): SetlistEntry => ({
+        this.entries = survivors.map((e): SetlistEntry => ({
             from: e.from,
             to: e.to,
             transition: e.transition
         }));
     }
 
-    private static migrateLegacyPayload(parsed: unknown): void {
+    private static migrateLegacyPayload(parsed: unknown): unknown[] {
         if (!Array.isArray(parsed)) {
-            return;
+            return [];
         }
+        const out: unknown[] = [];
         for (const entry of parsed) {
             if (entry === null || typeof entry !== 'object') {
                 continue;
@@ -180,7 +181,12 @@ export class SetlistStore {
             const e = entry as Record<string, unknown>;
             SetlistStore.backfillRouteTrackFields(e.from);
             SetlistStore.backfillRouteTrackFields(e.to);
+            if (!SetlistStore.hasProviderId(e.from) || !SetlistStore.hasProviderId(e.to)) {
+                continue;
+            }
+            out.push(entry);
         }
+        return out;
     }
 
     private static backfillRouteTrackFields(track: unknown): void {
@@ -191,6 +197,14 @@ export class SetlistStore {
         if (typeof t.hasCover !== 'boolean') {
             t.hasCover = false;
         }
+    }
+
+    private static hasProviderId(track: unknown): boolean {
+        if (track === null || typeof track !== 'object') {
+            return false;
+        }
+        const t = track as Record<string, unknown>;
+        return typeof t.providerId === 'string' && t.providerId !== '';
     }
 
     private saveToStorage(): void {

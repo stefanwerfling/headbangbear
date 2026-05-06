@@ -1,14 +1,13 @@
 import { promises as fs } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Vts, type ExtractSchemaResultType, type SchemaErrors } from 'vts';
+import type { DataSource } from 'typeorm';
+import { type SchemaErrors } from 'vts';
 import { Camelot } from '../Analysis/Camelot.js';
 import { EssentiaAudioAnalyzer } from '../Analysis/EssentiaAudioAnalyzer.js';
-import {
-    SerializedAnalysisResultSchema,
-    type MusicalKey,
-    type SerializedAnalysisResult
-} from '../Analysis/schemas.js';
+import { type MusicalKey } from '../Analysis/schemas.js';
+import { AnalyzedTrackEntity } from '../Database/Entity/AnalyzedTrackEntity.js';
+import { TrackMetadataEntity } from '../Database/Entity/TrackMetadataEntity.js';
 import { KeyEvaluator } from '../Eval/KeyEvaluator.js';
 import { KeyProfileSweep, type KeyOnlyAnalyzer } from '../Eval/KeyProfileSweep.js';
 import {
@@ -16,23 +15,14 @@ import {
     type KeyEvalReport,
     type KeyProfileSweepReport
 } from '../Eval/schemas.js';
+import { TrackLibrary, type AnalyzedTrack } from '../Library/TrackLibrary.js';
+import { createCliDataSource } from './cliDataSource.js';
+
+const CLI_PROVIDER_ID: string = 'cli';
 
 const DEFAULT_SWEEP_PROFILES: readonly string[] = [
     'bgate', 'temperley', 'krumhansl', 'edmm', 'edma', 'shaath'
 ];
-
-const CacheEntrySchema = Vts.object({
-    path: Vts.string(),
-    mtime: Vts.number(),
-    size: Vts.number(),
-    result: SerializedAnalysisResultSchema
-});
-
-const CacheFileSchema = Vts.object({
-    version: Vts.number(),
-    entries: Vts.array(CacheEntrySchema)
-});
-type CacheFile = ExtractSchemaResultType<typeof CacheFileSchema>;
 
 interface ParsedTruth {
     readonly map: Map<string, MusicalKey>;
@@ -40,11 +30,14 @@ interface ParsedTruth {
 }
 
 /**
- * `npm run key-eval -- <library-dir> <truth.json> [--json]` — compares cached key
- * predictions in `<library-dir>/.analysis-cache.json` against a hand-labelled truth
- * file and prints a MIREX-style report (per-track diff + accuracy summary).
+ * `npm run key-eval -- <library-dir> <truth.json> [--json]` — runs the analyzer
+ * over `<library-dir>` and compares the predicted keys against a hand-labelled
+ * truth file, printing a MIREX-style report (per-track diff + accuracy summary).
  *
- * Read-only: never invokes the analyzer, never writes the cache, ignores missing tracks.
+ * Iter 52 retired the legacy JSON cache — predictions now come from a fresh
+ * in-memory SQLite DB scan, so each invocation re-analyses the library. That's
+ * intentional for a dev tool; truth-label iteration that pays full analysis
+ * cost is acceptable on the small evaluation libraries this CLI is aimed at.
  */
 export class KeyEval {
 
@@ -115,7 +108,7 @@ export class KeyEval {
         }
         const sweep: KeyProfileSweep = new KeyProfileSweep(
             libraryDir,
-            (profile: string): KeyOnlyAnalyzer => new EssentiaAudioAnalyzer(undefined, undefined, profile),
+            (profile: string): KeyOnlyAnalyzer => new EssentiaAudioAnalyzer(undefined, profile),
             ({ profile, filePath, index, total }): void => {
                 process.stderr.write(`[${profile}] ${index.toString()}/${total.toString()} ${basename(filePath)}\n`);
             }
@@ -152,25 +145,31 @@ export class KeyEval {
     }
 
     private static async loadPredictions(libraryDir: string): Promise<Map<string, MusicalKey>> {
-        const cachePath: string = join(libraryDir, '.analysis-cache.json');
-        let raw: string;
+        const ds: DataSource = await createCliDataSource();
         try {
-            raw = await fs.readFile(cachePath, 'utf8');
-        } catch {
-            throw new Error(`No analysis cache at ${cachePath} — run an analysis first.`);
+            const lib: TrackLibrary = new TrackLibrary(
+                CLI_PROVIDER_ID,
+                libraryDir,
+                new EssentiaAudioAnalyzer(),
+                ds.getRepository(AnalyzedTrackEntity),
+                ds.getRepository(TrackMetadataEntity),
+                (event): void => {
+                    if (event.phase === 'analyse') {
+                        process.stderr.write(
+                            `[${event.current.toString()}/${event.total.toString()}] analyzing ${basename(event.name)}\n`,
+                        );
+                    }
+                },
+            );
+            const tracks: AnalyzedTrack[] = await lib.scan();
+            const map: Map<string, MusicalKey> = new Map();
+            for (const track of tracks) {
+                map.set(KeyEval.normalizeName(basename(track.path)), track.result.key);
+            }
+            return map;
+        } finally {
+            await ds.destroy();
         }
-        const parsed: unknown = JSON.parse(raw);
-        const errors: SchemaErrors = [];
-        if (!CacheFileSchema.validate(parsed, errors)) {
-            throw new Error(`Cache file at ${cachePath} does not match expected schema`);
-        }
-        const validated: CacheFile = parsed;
-        const map: Map<string, MusicalKey> = new Map();
-        for (const entry of validated.entries) {
-            const result: SerializedAnalysisResult = entry.result;
-            map.set(KeyEval.normalizeName(basename(entry.path)), result.key);
-        }
-        return map;
     }
 
     private static async loadTruth(truthPath: string): Promise<ParsedTruth> {

@@ -1,58 +1,60 @@
-import { Essentia, EssentiaWASM, type EssentiaInstance, type EssentiaVector } from 'essentia.js';
+import { fileURLToPath } from 'node:url';
+import { Worker, type WorkerOptions } from 'node:worker_threads';
 import { FfmpegDecoder } from '../Audio/FfmpegDecoder.js';
 import { AudioAnalyzer, type AnalyzerInput } from './AudioAnalyzer.js';
 import { Camelot } from './Camelot.js';
 import { OpenKey } from './OpenKey.js';
-import { DropDetector } from './DropDetector.js';
-import { ENERGY_WINDOW_SEC } from './schemas.js';
-import type { AnalysisResult, KeyMode, MusicalKey, PitchClass } from './schemas.js';
+import type { AnalyzeRequest, AnalyzeResponse } from './EssentiaWorker.js';
+import type { AnalysisResult, MusicalKey } from './schemas.js';
 
-const TONIC_NORMALIZATION: Readonly<Record<string, PitchClass>> = {
-    C: 'C',
-    'C#': 'C#',
-    Db: 'C#',
-    D: 'D',
-    'D#': 'D#',
-    Eb: 'D#',
-    E: 'E',
-    F: 'F',
-    'F#': 'F#',
-    Gb: 'F#',
-    G: 'G',
-    'G#': 'G#',
-    Ab: 'G#',
-    A: 'A',
-    'A#': 'A#',
-    Bb: 'A#',
-    B: 'B',
-};
+interface PendingAnalysis {
+    readonly resolve: (response: AnalyzeResponse) => void;
+    readonly reject: (err: Error) => void;
+}
 
 /**
- * Real audio analysis backend using essentia.js (WebAssembly port of Essentia).
- * MP3 → ffmpeg → Float32 PCM @ 44.1kHz → essentia KeyExtractor + RhythmExtractor2013 + RMS.
+ * Off-thread essentia analysis. The WASM-bound `KeyExtractor` / `RhythmExtractor2013`
+ * / `RMS` calls — each tens to hundreds of milliseconds of solid CPU on a 4-min track —
+ * are delegated to a `worker_threads` Worker so the main event loop stays free to serve
+ * HTTP during a scan. Audio decoding (ffmpeg subprocess) is already non-blocking and
+ * stays on the main thread; only the post-decode samples are transferred (zero-copy
+ * via `ArrayBuffer` transfer list) into the worker.
+ *
+ * The Worker is a process-wide singleton — every analyzer instance shares one worker
+ * and one WASM module. KeyProfileSweep instantiates six analyzers (one per profile)
+ * but they all funnel through the same worker, so we don't pay six WASM init costs.
  *
  * `profileType` controls essentia's KeyExtractor profile. Default `'bgate'` matches
- * essentia's own default. For tuning against EDM/dance libraries, `'edmm'`/`'edma'`/
- * `'faraldo'` often outperform on MIREX scoring; `'krumhansl'`/`'temperley'` are
- * classical-leaning. The `KeyProfileSweep` (under `src/Eval/`) compares them.
+ * essentia's own default. `KeyProfileSweep` (under `src/Eval/`) compares profiles
+ * empirically per library.
  */
 export class EssentiaAudioAnalyzer extends AudioAnalyzer {
-    private readonly decoder: FfmpegDecoder;
 
-    private readonly dropDetector: DropDetector;
+    private static workerInstance: Worker | null = null;
+
+    private static pending: Map<number, PendingAnalysis> = new Map();
+
+    private static nextId: number = 1;
+
+    /** Number of successful + failed analyses on the current worker. Used to
+     *  proactively recycle the worker every `WORKER_RECYCLE_AFTER` calls so the
+     *  WASM heap inside essentia.js doesn't grow without bound across long
+     *  scans (a 7k-track Jellyfin library has been observed to OOM-kill the
+     *  process around track ~700 without recycling). */
+    private static workerCallCount: number = 0;
+
+    private static readonly WORKER_RECYCLE_AFTER: number = 200;
+
+    private readonly decoder: FfmpegDecoder;
 
     private readonly profileType: string;
 
-    private essentia: EssentiaInstance | null = null;
-
     public constructor(
         decoder: FfmpegDecoder = new FfmpegDecoder(),
-        dropDetector: DropDetector = new DropDetector(),
         profileType: string = 'bgate',
     ) {
         super();
         this.decoder = decoder;
-        this.dropDetector = dropDetector;
         this.profileType = profileType;
     }
 
@@ -65,21 +67,16 @@ export class EssentiaAudioAnalyzer extends AudioAnalyzer {
         if (samples.length === 0) {
             throw new Error(`No audio samples decoded from ${EssentiaAudioAnalyzer.describeInput(input)}`);
         }
-        const essentia: EssentiaInstance = await this.getEssentia();
-        const vector: EssentiaVector = essentia.arrayToVector(samples);
-        try {
-            const keyRes = essentia.KeyExtractor(
-                vector,
-                undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-                this.profileType,
-            );
-            return {
-                tonic: EssentiaAudioAnalyzer.normalizeTonic(keyRes.key),
-                mode: EssentiaAudioAnalyzer.normalizeMode(keyRes.scale),
-            };
-        } finally {
-            vector.delete();
+        const response: AnalyzeResponse = await EssentiaAudioAnalyzer.dispatch({
+            samples: samples,
+            sampleRate: this.decoder.rate,
+            profileType: this.profileType,
+            keyOnly: true,
+        });
+        if (!response.ok) {
+            throw new Error(response.error);
         }
+        return { tonic: response.keyTonic, mode: response.keyMode };
     }
 
     public override async analyze(input: AnalyzerInput): Promise<AnalysisResult> {
@@ -87,93 +84,143 @@ export class EssentiaAudioAnalyzer extends AudioAnalyzer {
         if (samples.length === 0) {
             throw new Error(`No audio samples decoded from ${EssentiaAudioAnalyzer.describeInput(input)}`);
         }
-        const essentia: EssentiaInstance = await this.getEssentia();
-        const vector: EssentiaVector = essentia.arrayToVector(samples);
-        try {
-            const keyRes = essentia.KeyExtractor(
-                vector,
-                undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-                this.profileType,
-            );
-            const rhythm = essentia.RhythmExtractor2013(vector);
-            const rms = essentia.RMS(vector);
-            const beats: number[] = EssentiaAudioAnalyzer.extractBeats(essentia, rhythm.ticks);
-            const energyTimeline: number[] = EssentiaAudioAnalyzer.computeEnergyTimeline(
-                samples,
-                this.decoder.rate,
-            );
-            const drops: number[] = this.dropDetector.detect(energyTimeline, ENERGY_WINDOW_SEC);
-
-            const key: MusicalKey = {
-                tonic: EssentiaAudioAnalyzer.normalizeTonic(keyRes.key),
-                mode: EssentiaAudioAnalyzer.normalizeMode(keyRes.scale),
-            };
-            const camelot: Camelot = Camelot.fromKey(key);
-            const openKey: OpenKey = OpenKey.fromCamelot(camelot);
-
-            return {
-                key: key,
-                camelot: camelot,
-                openKey: openKey,
-                bpm: Math.round(rhythm.bpm * 10) / 10,
-                energy: EssentiaAudioAnalyzer.normalizeEnergy(rms.rms),
-                durationSec: Math.round((samples.length / this.decoder.rate) * 10) / 10,
-                beats: beats,
-                energyTimeline: energyTimeline,
-                drops: drops,
-            };
-        } finally {
-            vector.delete();
-        }
-    }
-
-    private static extractBeats(essentia: EssentiaInstance, ticks: EssentiaVector): number[] {
-        const arr: Float32Array = essentia.vectorToArray(ticks);
-        const beats: number[] = new Array<number>(arr.length);
-        for (let i = 0; i < arr.length; i++) {
-            beats[i] = Math.round((arr[i] ?? 0) * 1000) / 1000;
-        }
-        return beats;
-    }
-
-    private static computeEnergyTimeline(samples: Float32Array, sampleRate: number): number[] {
-        const windowSize: number = sampleRate * ENERGY_WINDOW_SEC;
-        const windowCount: number = Math.floor(samples.length / windowSize);
-        const out: number[] = new Array<number>(windowCount);
-        for (let w = 0; w < windowCount; w++) {
-            const start: number = w * windowSize;
-            let sumSquares: number = 0;
-            for (let i = 0; i < windowSize; i++) {
-                const v: number = samples[start + i] ?? 0;
-                sumSquares += v * v;
-            }
-            const rms: number = Math.sqrt(sumSquares / windowSize);
-            out[w] = Math.round(rms * 1000) / 1000;
-        }
-        return out;
-    }
-
-    private async getEssentia(): Promise<EssentiaInstance> {
-        if (this.essentia === null) {
-            await EssentiaAudioAnalyzer.waitForWasm();
-            this.essentia = new Essentia(EssentiaWASM);
-        }
-        return this.essentia;
-    }
-
-    private static waitForWasm(): Promise<void> {
-        if (EssentiaWASM.EssentiaJS !== undefined) {
-            return Promise.resolve();
-        }
-        return new Promise<void>((resolve): void => {
-            const before: (() => void) | undefined = EssentiaWASM.onRuntimeInitialized;
-            EssentiaWASM.onRuntimeInitialized = (): void => {
-                if (before !== undefined) {
-                    before();
-                }
-                resolve();
-            };
+        const response: AnalyzeResponse = await EssentiaAudioAnalyzer.dispatch({
+            samples: samples,
+            sampleRate: this.decoder.rate,
+            profileType: this.profileType,
+            keyOnly: false,
         });
+        if (!response.ok) {
+            throw new Error(response.error);
+        }
+        // The worker can't ship class instances across postMessage so it returns the
+        // primitives and we hydrate Camelot + OpenKey here. Both constructors are
+        // O(1) lookups, no measurable cost.
+        const key: MusicalKey = { tonic: response.keyTonic, mode: response.keyMode };
+        const camelot: Camelot = Camelot.fromKey(key);
+        const openKey: OpenKey = OpenKey.fromCamelot(camelot);
+        return {
+            key: key,
+            camelot: camelot,
+            openKey: openKey,
+            bpm: response.bpm ?? 0,
+            energy: response.energy ?? 0,
+            durationSec: response.durationSec ?? 0,
+            beats: response.beats ?? [],
+            energyTimeline: response.energyTimeline ?? [],
+            drops: response.drops ?? [],
+        };
+    }
+
+    /** Send one analyze request to the (singleton) worker and await the matching
+     *  response. Concurrent calls are multiplexed by the request `id`.
+     *
+     *  After every response (ok or error) the worker is recycled if either
+     *  (a) the response is an error — Essentia's WASM module sometimes calls
+     *  `abort(undefined)` on malformed audio, which corrupts subsequent state
+     *  even though our `vector.delete()` ran in the finally — or (b) the call
+     *  count exceeds `WORKER_RECYCLE_AFTER`, capping accumulated WASM-heap
+     *  growth. Both rules together keep the process's RSS bounded over the
+     *  lifetime of a 7k-track scan. */
+    private static async dispatch(req: Omit<AnalyzeRequest, 'id'>): Promise<AnalyzeResponse> {
+        const worker: Worker = EssentiaAudioAnalyzer.getWorker();
+        const id: number = EssentiaAudioAnalyzer.nextId++;
+        const response: AnalyzeResponse = await new Promise<AnalyzeResponse>(
+            (resolve, reject): void => {
+                EssentiaAudioAnalyzer.pending.set(id, { resolve: resolve, reject: reject });
+                const fullReq: AnalyzeRequest = {
+                    id: id,
+                    samples: req.samples,
+                    sampleRate: req.sampleRate,
+                    profileType: req.profileType,
+                    keyOnly: req.keyOnly,
+                };
+                // Transfer the underlying buffer so we don't pay a structured-clone copy
+                // (a 4-min track's PCM is ~40 MB at 44.1 kHz mono Float32). The cast is
+                // safe — `FfmpegDecoder` always returns a `Float32Array` over a fresh
+                // `ArrayBuffer` (never a `SharedArrayBuffer`), but the type system
+                // widens `Float32Array['buffer']` to `ArrayBufferLike`.
+                worker.postMessage(fullReq, [fullReq.samples.buffer as ArrayBuffer]);
+            },
+        );
+        EssentiaAudioAnalyzer.workerCallCount += 1;
+        const shouldRecycle: boolean = !response.ok
+            || EssentiaAudioAnalyzer.workerCallCount >= EssentiaAudioAnalyzer.WORKER_RECYCLE_AFTER;
+        if (shouldRecycle) {
+            EssentiaAudioAnalyzer.recycleWorker();
+        }
+        return response;
+    }
+
+    /** Tear down the current worker so the next `dispatch` lazy-spawns a fresh
+     *  one. In-flight requests on the dying worker are left to the existing
+     *  `error` / `exit` handlers — `terminate()` triggers `exit` which clears
+     *  `pending`. */
+    private static recycleWorker(): void {
+        if (EssentiaAudioAnalyzer.workerInstance === null) {
+            return;
+        }
+        const w: Worker = EssentiaAudioAnalyzer.workerInstance;
+        EssentiaAudioAnalyzer.workerInstance = null;
+        EssentiaAudioAnalyzer.workerCallCount = 0;
+        void w.terminate();
+    }
+
+    private static getWorker(): Worker {
+        if (EssentiaAudioAnalyzer.workerInstance !== null) {
+            return EssentiaAudioAnalyzer.workerInstance;
+        }
+        const here: string = fileURLToPath(import.meta.url);
+        // Sibling `EssentiaWorker.<ts|js>` next to this file. Dev runs under `tsx
+        // watch` (source `.ts`); prod runs the `tsc`-built `.js`. We pick the
+        // matching extension from `import.meta.url` so the same code resolves
+        // correctly in both modes.
+        const workerEntry: string = here.replace(
+            /EssentiaAudioAnalyzer\.(ts|js)$/,
+            'EssentiaWorker.$1',
+        );
+        const isTs: boolean = workerEntry.endsWith('.ts');
+        // tsx 4.x supports `--import tsx` to register its loader for the worker
+        // process. The loader transpiles `.ts` on demand, just like in the parent.
+        const options: WorkerOptions = isTs ? { execArgv: ['--import', 'tsx'] } : {};
+        const w: Worker = new Worker(workerEntry, options);
+        w.on('message', (msg: AnalyzeResponse): void => {
+            const pending: PendingAnalysis | undefined = EssentiaAudioAnalyzer.pending.get(msg.id);
+            if (pending === undefined) {
+                return;
+            }
+            EssentiaAudioAnalyzer.pending.delete(msg.id);
+            pending.resolve(msg);
+        });
+        w.on('error', (err: Error): void => {
+            // Worker-level error — fail every in-flight request and reset the
+            // singleton so the next analyze() spawns a fresh worker.
+            for (const p of EssentiaAudioAnalyzer.pending.values()) {
+                p.reject(err);
+            }
+            EssentiaAudioAnalyzer.pending.clear();
+            // Only clear the singleton if it still points at the dying worker.
+            // `recycleWorker()` may have already set a fresh one — don't null it.
+            if (EssentiaAudioAnalyzer.workerInstance === w) {
+                EssentiaAudioAnalyzer.workerInstance = null;
+            }
+        });
+        w.on('exit', (code: number): void => {
+            if (EssentiaAudioAnalyzer.workerInstance === w) {
+                EssentiaAudioAnalyzer.workerInstance = null;
+            }
+            if (EssentiaAudioAnalyzer.pending.size > 0) {
+                const err: Error = new Error(
+                    `EssentiaWorker exited unexpectedly with code ${code.toString()}`,
+                );
+                for (const p of EssentiaAudioAnalyzer.pending.values()) {
+                    p.reject(err);
+                }
+                EssentiaAudioAnalyzer.pending.clear();
+            }
+        });
+        EssentiaAudioAnalyzer.workerInstance = w;
+        return w;
     }
 
     /** Best-effort label for use in error messages — paths get returned as-is, streams
@@ -182,28 +229,4 @@ export class EssentiaAudioAnalyzer extends AudioAnalyzer {
         return typeof input === 'string' ? input : '<stream>';
     }
 
-    private static normalizeTonic(raw: string): PitchClass {
-        const found: PitchClass | undefined = TONIC_NORMALIZATION[raw];
-        if (found === undefined) {
-            throw new Error(`Unknown tonic from essentia: "${raw}"`);
-        }
-        return found;
-    }
-
-    private static normalizeMode(raw: string): KeyMode {
-        if (raw === 'major' || raw === 'minor') {
-            return raw;
-        }
-        throw new Error(`Unknown mode from essentia: "${raw}"`);
-    }
-
-    private static normalizeEnergy(rms: number): number {
-        if (Number.isNaN(rms) || rms < 0) {
-            return 0;
-        }
-        if (rms > 1) {
-            return 1;
-        }
-        return Math.round(rms * 1000) / 1000;
-    }
 }

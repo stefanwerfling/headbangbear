@@ -1,25 +1,37 @@
 import { Vts, type ExtractSchemaResultType } from 'vts';
 
 /**
- * One ground-truth label: filename → canonical key string. The on-disk format used by
- * the backend's `truth.json` (and the existing `KeyEval` CLI) is a flat
- * `{ "filename.mp3": "A minor" }` map; the API surfaces it as an array because vts
- * arrays validate and round-trip more cleanly than open-ended object maps.
+ * One ground-truth label scoped to a specific library provider. `providerId` is the
+ * id of the provider the track lives in (`local`-kind only — Jellyfin tracks aren't
+ * labelled by filename); `path` is the per-provider source-id (relative path under
+ * the provider's `rootDir`). `key` is permissive — the backend's
+ * `KeyEvaluator.parseKey` accepts "A minor", "Am", "Bb major", Camelot codes, etc.
  *
- * `key` is intentionally permissive — the backend's `KeyEvaluator.parseKey` accepts
- * "A minor", "Am", "Bb major", Camelot codes, etc. An empty string means "not labelled
- * yet" and is filtered out before persistence.
+ * The on-disk truth file is one-per-provider (`<rootDir>/truth.json`). The API
+ * surfaces an array (rather than the legacy filename→key map) so each entry can
+ * carry its own `providerId` and round-trip cleanly through vts.
  */
 export const KeyLabelEntrySchema = Vts.object({
-    filename: Vts.string(),
+    providerId: Vts.string(),
+    path: Vts.string(),
     key: Vts.string(),
 });
 export type KeyLabelEntry = ExtractSchemaResultType<typeof KeyLabelEntrySchema>;
+
+/** Query for `GET /api/v1/library/key-labels?providerId=<id>` — restricts the
+ *  response to one provider's truth file (Jellyfin providers are silently empty). */
+export const KeyLabelsQuerySchema = Vts.object({
+    providerId: Vts.string(),
+});
+export type KeyLabelsQuery = ExtractSchemaResultType<typeof KeyLabelsQuerySchema>;
 
 export const KeyLabelsResponseSchema = Vts.object({
     labels: Vts.array(KeyLabelEntrySchema),
 });
 export type KeyLabelsResponse = ExtractSchemaResultType<typeof KeyLabelsResponseSchema>;
 
-export const KeyLabelsBodySchema = KeyLabelsResponseSchema;
-export type KeyLabelsBody = KeyLabelsResponse;
+export const KeyLabelsBodySchema = Vts.object({
+    providerId: Vts.string(),
+    labels: Vts.array(KeyLabelEntrySchema),
+});
+export type KeyLabelsBody = ExtractSchemaResultType<typeof KeyLabelsBodySchema>;

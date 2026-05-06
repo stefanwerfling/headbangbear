@@ -34,10 +34,15 @@ export const KeyProfileSweepReportSchema = Vts.object({
 export type KeyProfileSweepReport = ExtractSchemaResultType<typeof KeyProfileSweepReportSchema>;
 
 /**
- * Request body for `POST /api/v1/library/profile-sweep`. Empty / omitted `profiles` means
- * "use the server's default set" — the same list the CLI uses without `--profiles=...`.
+ * Request body for `POST /api/v1/library/profile-sweep`. Sweeps only run against
+ * a single `local`-kind provider — there's no on-disk audio for Jellyfin items so
+ * re-extracting key against alternate profiles isn't applicable. `providerId`
+ * picks which local provider's truth file + audio to sweep. Empty / omitted
+ * `profiles` means "use the server's default set" — the same list the CLI uses
+ * without `--profiles=...`.
  */
 export const KeyProfileSweepBodySchema = Vts.object({
+    providerId: Vts.string(),
     profiles: Vts.optional(Vts.array(Vts.string())),
 });
 export type KeyProfileSweepBody = ExtractSchemaResultType<typeof KeyProfileSweepBodySchema>;

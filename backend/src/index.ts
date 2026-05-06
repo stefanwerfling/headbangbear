@@ -1,3 +1,4 @@
+import 'reflect-metadata';
 import { bootstrap, type BootstrapResult } from 'figtree';
 import { HeadbangbearApp } from './Server/HeadbangbearApp.js';
 

@@ -38,7 +38,7 @@ function buildTrack(opts: BuildOpts): AnalyzedTrack {
         energyTimeline: energyTimeline,
         drops: [],
     };
-    return { path: opts.path, result: result, hasCover: false };
+    return { providerId: 'test', path: opts.path, result: result, hasCover: false, disabled: false };
 }
 
 describe('DjSetPlanner', (): void => {

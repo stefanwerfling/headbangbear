@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { DefaultRoute } from 'figtree';
 import type { AnalyzedTrack } from '../../Library/TrackLibrary.js';
-import type { LibraryFacade, LibraryService } from '../LibraryService.js';
+import type { LibraryService } from '../LibraryService.js';
 import {
     LibraryResponseSchema,
     ScanStatusSchema,
@@ -11,16 +11,18 @@ import {
 } from '@headbangbear/schemas';
 
 /**
- * `GET /api/v1/library/list` — returns the in-memory analysed track list. Cheap; the
- * scan + cache work happens once on `LibraryService.start()`.
+ * `GET /api/v1/library/list` — returns the in-memory analysed track list **across
+ * every configured provider**. Each track carries its own `providerId` so the
+ * frontend can dispatch per-track API calls (audio, cover, mix) back to the
+ * right provider.
  *
- * `POST /api/v1/library/rescan` — re-runs the disk scan and returns the refreshed list.
- * Useful when new MP3s are dropped into the configured directory while the server is up.
+ * `POST /api/v1/library/rescan` — re-runs the disk / Jellyfin scan for every
+ * provider sequentially and returns the refreshed combined list.
+ *
+ * `GET /api/v1/library/scan-status` — current scan progress (which provider, which
+ * track within that provider, etc.).
  */
 export class LibraryRoute extends DefaultRoute {
-    private readonly library: LibraryFacade;
-
-    private readonly libraryDir: string;
 
     private readonly service: LibraryService;
 
@@ -28,14 +30,11 @@ export class LibraryRoute extends DefaultRoute {
         super();
         this._uriBase = '/api/';
         this.service = service;
-        this.library = service.getLibrary();
-        this.libraryDir = service.getRootDir();
     }
 
     public list(): LibraryResponse {
         return {
-            libraryDir: this.libraryDir,
-            tracks: this.library.tracks().map(LibraryRoute.toRouteTrack),
+            tracks: this.service.allTracks().map(LibraryRoute.toRouteTrack),
         };
     }
 
@@ -50,7 +49,7 @@ export class LibraryRoute extends DefaultRoute {
             false,
             async (_req, _res, _data): Promise<LibraryResponse> => this.list(),
             {
-                description: 'List all analysed tracks in the configured library directory.',
+                description: 'List all analysed tracks across every configured provider.',
                 tags: ['library'],
                 responseBodySchema: LibraryResponseSchema,
             },
@@ -60,7 +59,7 @@ export class LibraryRoute extends DefaultRoute {
             false,
             async (_req, _res, _data): Promise<LibraryResponse> => this.rescan(),
             {
-                description: 'Re-scan the library directory; returns the refreshed list.',
+                description: 'Re-scan every configured provider; returns the refreshed list.',
                 tags: ['library'],
                 responseBodySchema: LibraryResponseSchema,
             },
@@ -80,6 +79,7 @@ export class LibraryRoute extends DefaultRoute {
 
     public static toRouteTrack(t: AnalyzedTrack): RouteTrack {
         const route: RouteTrack = {
+            providerId: t.providerId,
             path: t.path,
             camelot: t.result.camelot.toString(),
             openKey: t.result.openKey.toString(),
@@ -90,6 +90,7 @@ export class LibraryRoute extends DefaultRoute {
             energyTimeline: t.result.energyTimeline,
             beats: t.result.beats,
             hasCover: t.hasCover,
+            disabled: t.disabled,
         };
         if (t.metadata !== undefined) {
             route.metadata = t.metadata;

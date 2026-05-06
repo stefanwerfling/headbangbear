@@ -7,12 +7,12 @@ import {
     Lang,
     LangText,
     Table,
-    Td,
     Th,
     Tr
 } from 'bambooo';
 import { DjSetApi } from '../Api/DjSetApi.js';
 import { LibraryApi } from '../Api/LibraryApi.js';
+import { TracksApi } from '../Api/TracksApi.js';
 import { TranscodeApi } from '../Api/TranscodeApi.js';
 import {
     type DjSet as DjSetData,
@@ -77,6 +77,20 @@ export class DjSet extends BasePage {
 
     private libraryByPath: Map<string, RouteTrack> = new Map();
 
+    /** Backing data for the chunked chain renderer — stored when `renderChain`
+     *  is called, consumed by `renderMoreChainRows` on scroll. */
+    private chainTracks: DjSetData['tracks'] = [];
+
+    private chainTransitions: DjSetData['transitions'] = [];
+
+    private chainManual: boolean = false;
+
+    private renderedChainCount: number = 0;
+
+    private chainScrollHandler: ((e: Event) => void) | null = null;
+
+    private static readonly CHAIN_CHUNK_SIZE: number = 100;
+
     private masterVolume: number = 0.85;
 
     private masterEq: MasterEqState = { lowDb: 0, midDb: 0, highDb: 0 };
@@ -111,6 +125,10 @@ export class DjSet extends BasePage {
         if (this.lastRecordingUrl !== null) {
             URL.revokeObjectURL(this.lastRecordingUrl);
             this.lastRecordingUrl = null;
+        }
+        if (this.chainScrollHandler !== null) {
+            window.removeEventListener('scroll', this.chainScrollHandler);
+            this.chainScrollHandler = null;
         }
     }
 
@@ -510,11 +528,61 @@ export class DjSet extends BasePage {
             const lib = await LibraryApi.list();
             this.libraryByPath.clear();
             for (const t of lib.tracks) {
-                this.libraryByPath.set(t.path, t);
+                this.libraryByPath.set(DjSet.libraryKey(t.providerId, t.path), t);
             }
         } catch (err) {
             console.warn('DjSet page: failed to pre-fetch library:', err);
         }
+    }
+
+    /** Composite map key for `libraryByPath` — `path` alone is ambiguous across providers
+     *  (e.g. two `local` providers can both contain `house/track.mp3`). */
+    private static libraryKey(providerId: string, path: string): string {
+        return `${providerId}|${path}`;
+    }
+
+    /**
+     * Kick the async planner off, then poll `plan-status` every 500 ms until the
+     * job is `done` or `error`. Surfaces progress events into the status element
+     * so the user sees "evaluating start 1234 / 7518" instead of a frozen UI.
+     * Resolves with the final `DjSet`; rejects on `error` state with the
+     * worker's error message.
+     */
+    private async runPlanWithPolling(request: DjSetBody): Promise<DjSetData> {
+        const initial = await DjSetApi.plan(request);
+        if (initial.state === 'done' && initial.result !== undefined) {
+            return initial.result;
+        }
+        if (initial.state === 'error') {
+            throw new Error(initial.error ?? 'Unknown planner error');
+        }
+        // Poll. 500ms is fast enough that the user perceives progress as live;
+        // beam search over 7k tracks completes in tens of seconds, so 500ms ×
+        // ~60 polls = manageable network traffic.
+        const POLL_INTERVAL_MS: number = 500;
+        // Hard timeout — 10 minutes. Beam over a really large library can be
+        // slow but anything past this is almost certainly stuck.
+        const HARD_TIMEOUT_MS: number = 10 * 60 * 1000;
+        const deadline: number = Date.now() + HARD_TIMEOUT_MS;
+        while (Date.now() < deadline) {
+            await new Promise<void>((resolve): void => {
+                setTimeout(resolve, POLL_INTERVAL_MS);
+            });
+            const status = await DjSetApi.planStatus();
+            if (status.progress !== undefined && this.$statusEl !== null) {
+                this.$statusEl.text(
+                    `${DjSet.langOrFallback('dj_set_status_generating')} `
+                    + `(${status.progress.current.toString()} / ${status.progress.total.toString()})`,
+                );
+            }
+            if (status.state === 'done' && status.result !== undefined) {
+                return status.result;
+            }
+            if (status.state === 'error') {
+                throw new Error(status.error ?? 'Unknown planner error');
+            }
+        }
+        throw new Error('Planner timeout');
     }
 
     private async generate(): Promise<void> {
@@ -560,7 +628,7 @@ export class DjSet extends BasePage {
         this.$statusEl.text(DjSet.langOrFallback('dj_set_status_generating'));
         let djSet: DjSetData;
         try {
-            djSet = await DjSetApi.plan(request);
+            djSet = await this.runPlanWithPolling(request);
         } catch (err) {
             this.$statusEl.html(
                 `<span class="text-danger">${DjSet.langOrFallback('dj_set_status_generate_failed')}: ${
@@ -616,6 +684,12 @@ export class DjSet extends BasePage {
             return;
         }
 
+        // Stash for chunked rendering — `renderMoreChainRows` reads from these.
+        this.chainTracks = djSet.tracks;
+        this.chainTransitions = djSet.transitions;
+        this.chainManual = manual;
+        this.renderedChainCount = 0;
+
         const table = new Table(this.$chainBody);
         table.setStyleHover(true);
         table.setStyleStriped(true);
@@ -641,80 +715,155 @@ export class DjSet extends BasePage {
         new Th(trhead, new ColumnContent([new LangText('chain_alignment')]));
         // eslint-disable-next-line no-new
         new Th(trhead, new ColumnContent([new LangText('chain_bars')]));
-        if (manual) {
-            // eslint-disable-next-line no-new
-            new Th(trhead, '');
-        }
+        // Action column — always present now (deactivate button); the manual
+        // setlist path adds a remove-from-setlist button on top of that.
+        // eslint-disable-next-line no-new
+        new Th(trhead, '');
 
-        for (let i = 0; i < djSet.tracks.length; i++) {
-            const track = djSet.tracks[i];
-            if (track === undefined) {
-                continue;
-            }
-            const transition = i < djSet.transitions.length ? djSet.transitions[i] : undefined;
-            const trbody = new Tr(table.getTbody());
-            trbody.getElement().attr('data-row-index', i.toString());
-
-            // eslint-disable-next-line no-new
-            new Td(trbody, (i + 1).toString());
-            const filename: string = TrackDisplayUtil.filenameOf(track.path);
-            // Look up the full RouteTrack so we can render cover + metadata; falls back to a
-            // synthetic stub when the chain references a path we never fetched (shouldn't
-            // happen in practice — `cacheLibrary` runs once on page load).
-            const fullTrack: RouteTrack | undefined = this.libraryByPath.get(track.path);
-            const displayTrack: RouteTrack = fullTrack ?? DjSet.routeTrackStub(track);
-            // eslint-disable-next-line no-new
-            new Td(trbody, TrackDisplayUtil.coverThumbHtml(displayTrack));
-            // eslint-disable-next-line no-new
-            new Td(trbody, TrackDisplayUtil.trackCellHtml(displayTrack, filename));
-            // eslint-disable-next-line no-new
-            new Td(trbody, `<span class="badge badge-info">${track.camelot}</span>`);
-            // eslint-disable-next-line no-new
-            new Td(trbody, track.bpm.toFixed(1));
-            // eslint-disable-next-line no-new
-            new Td(trbody, track.energy.toFixed(3));
-
-            if (transition !== undefined) {
-                const sign: string = transition.to.pitchPercent >= 0 ? '+' : '';
-                // eslint-disable-next-line no-new
-                new Td(trbody, `${sign}${transition.to.pitchPercent.toFixed(2)}%`);
-                // eslint-disable-next-line no-new
-                new Td(trbody, transition.keyMatch);
-                // eslint-disable-next-line no-new
-                new Td(trbody, transition.alignment);
-                // eslint-disable-next-line no-new
-                new Td(trbody, transition.mixBars.toFixed(1));
-            } else {
-                // eslint-disable-next-line no-new
-                new Td(trbody, '—');
-                // eslint-disable-next-line no-new
-                new Td(trbody, '—');
-                // eslint-disable-next-line no-new
-                new Td(trbody, '—');
-                // eslint-disable-next-line no-new
-                new Td(trbody, '—');
-            }
-
-            if (manual) {
-                const actionTd = new Td(trbody, '');
-                if (i < djSet.transitions.length) {
-                    const $btn = jQuery<HTMLButtonElement>(
-                        `<button type="button" class="btn btn-xs btn-danger" title="${DjSet.langOrFallback('dj_set_remove_transition')}">
-                            <i class="fas fa-times"></i>
-                        </button>`
-                    );
-                    const transitionIndex: number = i;
-                    $btn.on('click', (): void => {
-                        SetlistStore.getInstance().removeAt(transitionIndex);
-                    });
-                    actionTd.getElement().append($btn);
-                }
-            }
-        }
+        // Render the first chunk, then install a scroll listener for the rest.
+        // For typical 10-50 track chains this renders everything in the first
+        // chunk; for big beam-search chains (200+) chunking saves the browser.
+        // bambooo's `getTbody` returns a JQuery wrapper despite the
+        // `HTMLTableSectionElement` annotation — unwrap to the raw DOM node.
+        const tbodyJq = table.getTbody() as unknown as JQuery<HTMLTableSectionElement>;
+        const tbody: HTMLTableSectionElement = tbodyJq[0] as HTMLTableSectionElement;
+        this.renderMoreChainRows(tbody);
+        this.installChainInfiniteScroll(tbody);
 
         if (djSet.tracks.length >= 2) {
             this.$chainBody.append(DjSet.renderEnergyChart(djSet));
         }
+    }
+
+    /** Append the next `CHAIN_CHUNK_SIZE` chain rows. Reads `chainTracks` /
+     *  `chainTransitions` / `chainManual` set by `renderChain`. */
+    private renderMoreChainRows(tbody: HTMLTableSectionElement): void {
+        const end: number = Math.min(
+            this.renderedChainCount + DjSet.CHAIN_CHUNK_SIZE,
+            this.chainTracks.length,
+        );
+        for (let i = this.renderedChainCount; i < end; i++) {
+            const track = this.chainTracks[i];
+            if (track === undefined) {
+                continue;
+            }
+            const transition = i < this.chainTransitions.length ? this.chainTransitions[i] : undefined;
+            tbody.appendChild(this.buildChainRow(track, transition, i));
+        }
+        this.renderedChainCount = end;
+    }
+
+    private buildChainRow(
+        track: DjSetData['tracks'][number],
+        transition: DjSetData['transitions'][number] | undefined,
+        index: number,
+    ): HTMLTableRowElement {
+        const tr: HTMLTableRowElement = document.createElement('tr');
+        tr.setAttribute('data-row-index', index.toString());
+        const fullTrack: RouteTrack | undefined = this.libraryByPath.get(
+            DjSet.libraryKey(track.providerId, track.path),
+        );
+        const displayTrack: RouteTrack = fullTrack ?? DjSet.routeTrackStub(track);
+        if (displayTrack.disabled) {
+            tr.className = 'text-muted';
+        }
+        const filename: string = TrackDisplayUtil.filenameOf(track.path);
+        const td = (html: string): HTMLTableCellElement => {
+            const c: HTMLTableCellElement = document.createElement('td');
+            c.innerHTML = html;
+            return c;
+        };
+        tr.appendChild(td((index + 1).toString()));
+        tr.appendChild(td(TrackDisplayUtil.coverThumbHtml(displayTrack)));
+        tr.appendChild(td(TrackDisplayUtil.trackCellHtml(displayTrack, filename)));
+        tr.appendChild(td(`<span class="badge badge-info">${track.camelot}</span>`));
+        tr.appendChild(td(track.bpm.toFixed(1)));
+        tr.appendChild(td(track.energy.toFixed(3)));
+        if (transition !== undefined) {
+            const sign: string = transition.to.pitchPercent >= 0 ? '+' : '';
+            tr.appendChild(td(`${sign}${transition.to.pitchPercent.toFixed(2)}%`));
+            tr.appendChild(td(transition.keyMatch));
+            tr.appendChild(td(transition.alignment));
+            tr.appendChild(td(transition.mixBars.toFixed(1)));
+        } else {
+            tr.appendChild(td('—'));
+            tr.appendChild(td('—'));
+            tr.appendChild(td('—'));
+            tr.appendChild(td('—'));
+        }
+        // Action column: deactivate-track button always; remove-from-setlist
+        // button only on manual mode + transition rows.
+        const disabledIcon: string = displayTrack.disabled ? 'fa-toggle-off' : 'fa-toggle-on';
+        const disabledTitle: string = displayTrack.disabled
+            ? DjSet.langOrFallback('library_track_enable')
+            : DjSet.langOrFallback('library_track_disable');
+        const removeBtn: string = this.chainManual && index < this.chainTransitions.length
+            ? `<button type="button" class="btn btn-xs btn-danger ml-1 hbb-remove-transition" title="${DjSet.langOrFallback('dj_set_remove_transition')}"><i class="fas fa-times"></i></button>`
+            : '';
+        const actionTd: HTMLTableCellElement = document.createElement('td');
+        actionTd.innerHTML = `
+            <button type="button" class="btn btn-xs btn-default hbb-toggle-disabled" title="${disabledTitle}">
+                <i class="fas ${disabledIcon}"></i>
+            </button>${removeBtn}
+        `;
+        const $actions = jQuery(actionTd);
+        $actions.find<HTMLButtonElement>('.hbb-toggle-disabled').on('click', (): void => {
+            void this.toggleChainTrackDisabled(track, displayTrack, tr);
+        });
+        if (this.chainManual && index < this.chainTransitions.length) {
+            $actions.find<HTMLButtonElement>('.hbb-remove-transition').on('click', (): void => {
+                SetlistStore.getInstance().removeAt(index);
+            });
+        }
+        tr.appendChild(actionTd);
+        return tr;
+    }
+
+    /** Same shape as `Library.toggleTrackDisabled` — POST to the disable
+     *  endpoint, optimistic UI flip, revert on error. The cached `RouteTrack`
+     *  in `libraryByPath` is mutated so subsequent re-renders show the new
+     *  state without a fresh `LibraryApi.list()` call. */
+    private async toggleChainTrackDisabled(
+        track: DjSetData['tracks'][number],
+        displayTrack: RouteTrack,
+        row: HTMLTableRowElement,
+    ): Promise<void> {
+        const previous: boolean = displayTrack.disabled;
+        const next: boolean = !previous;
+        displayTrack.disabled = next;
+        row.classList.toggle('text-muted', next);
+        const $btn = jQuery(row).find<HTMLElement>('.hbb-toggle-disabled i');
+        $btn.removeClass('fa-toggle-on fa-toggle-off')
+            .addClass(next ? 'fa-toggle-off' : 'fa-toggle-on');
+        try {
+            await TracksApi.setDisabled({
+                providerId: track.providerId,
+                path: track.path,
+                disabled: next,
+            });
+        } catch (err) {
+            console.error('DjSet: setDisabled failed, reverting:', err);
+            displayTrack.disabled = previous;
+            row.classList.toggle('text-muted', previous);
+            $btn.removeClass('fa-toggle-on fa-toggle-off')
+                .addClass(previous ? 'fa-toggle-off' : 'fa-toggle-on');
+        }
+    }
+
+    private installChainInfiniteScroll(tbody: HTMLTableSectionElement): void {
+        if (this.chainScrollHandler !== null) {
+            window.removeEventListener('scroll', this.chainScrollHandler);
+        }
+        this.chainScrollHandler = (): void => {
+            if (this.renderedChainCount >= this.chainTracks.length) {
+                return;
+            }
+            const rect: DOMRect = tbody.getBoundingClientRect();
+            if (rect.bottom - window.innerHeight < 500) {
+                this.renderMoreChainRows(tbody);
+            }
+        };
+        window.addEventListener('scroll', this.chainScrollHandler, { passive: true });
     }
 
     /**
@@ -844,10 +993,10 @@ export class DjSet extends BasePage {
             const total: number = this.currentSet.tracks.length;
             await this.player.play(
                 this.currentSet,
-                (index: number, path: string): void => {
+                (index: number, providerId: string, path: string): void => {
                     this.currentNowPlayingIndex = index;
                     this.highlightRow(index);
-                    const fullTrack: RouteTrack | undefined = this.libraryByPath.get(path);
+                    const fullTrack: RouteTrack | undefined = this.libraryByPath.get(DjSet.libraryKey(providerId, path));
                     const filename: string = TrackDisplayUtil.filenameOf(path);
                     const display: string = DjSet.formatNowPlayingDisplay(fullTrack, filename);
                     this.$statusEl?.html(
@@ -965,6 +1114,7 @@ export class DjSet extends BasePage {
      */
     private static routeTrackStub(t: DjSetData['tracks'][number]): RouteTrack {
         return {
+            providerId: t.providerId,
             path: t.path,
             camelot: t.camelot,
             openKey: '',
@@ -975,6 +1125,7 @@ export class DjSet extends BasePage {
             energyTimeline: [],
             beats: [],
             hasCover: false,
+            disabled: false,
         };
     }
 

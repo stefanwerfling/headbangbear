@@ -9,7 +9,9 @@
         "level": "info",
         "dirname": "./logs"
     },
-    "library": {
-        "rootDir": "/absolute/path/to/your/library"
+    "dataDir": "./.hbb-data",
+    "database": {
+        "kind": "sqlite",
+        "file": "./.hbb-data/hbb.db"
     }
 }

@@ -1,8 +1,11 @@
 import { promises as fs } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
+import { basename, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { DataSource } from 'typeorm';
 import { TransitionStyleSchema, type TransitionStyle } from '@headbangbear/schemas';
 import { EssentiaAudioAnalyzer } from '../Analysis/EssentiaAudioAnalyzer.js';
+import { AnalyzedTrackEntity } from '../Database/Entity/AnalyzedTrackEntity.js';
+import { TrackMetadataEntity } from '../Database/Entity/TrackMetadataEntity.js';
 import {
     DjSetPlanner,
     type DjSet as DjSetResult,
@@ -11,6 +14,9 @@ import {
     type EnergyShape,
 } from '../DjSet/DjSetPlanner.js';
 import { TrackLibrary, type AnalyzedTrack } from '../Library/TrackLibrary.js';
+import { createCliDataSource } from './cliDataSource.js';
+
+const CLI_PROVIDER_ID: string = 'cli';
 
 interface CliArgs {
     readonly libraryDir: string;
@@ -25,6 +31,7 @@ interface CliArgs {
 }
 
 export class DjSet {
+
     private readonly library: TrackLibrary;
 
     public constructor(library: TrackLibrary) {
@@ -32,7 +39,7 @@ export class DjSet {
     }
 
     public async run(args: CliArgs): Promise<DjSetResult> {
-        const tracks: AnalyzedTrack[] = await this.library.scan(args.libraryDir);
+        const tracks: AnalyzedTrack[] = await this.library.scan();
         const startTrack: AnalyzedTrack | undefined = args.startPath !== undefined
             ? tracks.find((t: AnalyzedTrack): boolean => t.path === args.startPath)
             : undefined;
@@ -67,26 +74,33 @@ export class DjSet {
             console.error(`Directory not found or unreadable: ${parsed.libraryDir}`);
             return 1;
         }
-        const cachePath: string = join(parsed.libraryDir, '.analysis-cache.json');
-        const lib: TrackLibrary = new TrackLibrary(
-            new EssentiaAudioAnalyzer(),
-            cachePath,
-            (event): void => {
-                if (event.phase === 'analyse') {
-                    process.stderr.write(
-                        `[${event.current.toString()}/${event.total.toString()}] analyzing ${basename(event.name)}\n`,
-                    );
-                }
-            },
-        );
-        const cli: DjSet = new DjSet(lib);
+        const ds: DataSource = await createCliDataSource();
         try {
-            const result: DjSetResult = await cli.run(parsed);
-            console.log(JSON.stringify(result, null, 2));
-            return 0;
-        } catch (e) {
-            console.error(e instanceof Error ? e.message : String(e));
-            return 1;
+            const lib: TrackLibrary = new TrackLibrary(
+                CLI_PROVIDER_ID,
+                parsed.libraryDir,
+                new EssentiaAudioAnalyzer(),
+                ds.getRepository(AnalyzedTrackEntity),
+                ds.getRepository(TrackMetadataEntity),
+                (event): void => {
+                    if (event.phase === 'analyse') {
+                        process.stderr.write(
+                            `[${event.current.toString()}/${event.total.toString()}] analyzing ${basename(event.name)}\n`,
+                        );
+                    }
+                },
+            );
+            const cli: DjSet = new DjSet(lib);
+            try {
+                const result: DjSetResult = await cli.run(parsed);
+                console.log(JSON.stringify(result, null, 2));
+                return 0;
+            } catch (e) {
+                console.error(e instanceof Error ? e.message : String(e));
+                return 1;
+            }
+        } finally {
+            await ds.destroy();
         }
     }
 
@@ -100,7 +114,7 @@ export class DjSet {
         let beamWidth: number | undefined;
         let tryAllStarts: boolean = true;
         let shape: EnergyShape | undefined;
-        let startPath: string | undefined;
+        let startPathRaw: string | undefined;
         let targetDurationSec: number | undefined;
         let style: TransitionStyle | undefined;
         for (let i = 2; i < argv.length; i++) {
@@ -131,7 +145,7 @@ export class DjSet {
                 if (raw === '') {
                     return '--start requires a path';
                 }
-                startPath = resolve(raw);
+                startPathRaw = raw;
                 continue;
             }
             if (arg.startsWith('--target-min=')) {
@@ -157,8 +171,12 @@ export class DjSet {
         if (dirArg === undefined) {
             return usage;
         }
+        const libraryDir: string = resolve(dirArg);
+        const startPath: string | undefined = startPathRaw !== undefined
+            ? DjSet.toLibraryRelative(libraryDir, resolve(startPathRaw))
+            : undefined;
         return {
-            libraryDir: resolve(dirArg),
+            libraryDir: libraryDir,
             direction: DjSet.parseDirection(positional[1]),
             strategy: DjSet.parseStrategy(positional[2]),
             beamWidth: beamWidth,
@@ -168,6 +186,13 @@ export class DjSet {
             targetDurationSec: targetDurationSec,
             style: style,
         };
+    }
+
+    /** Match TrackLibrary's `sourceId` normalisation: forward-slash separators
+     *  regardless of OS, so an `--start=` lookup hits the in-memory map. */
+    private static toLibraryRelative(libraryDir: string, absPath: string): string {
+        const rel: string = relative(libraryDir, absPath);
+        return sep === '/' ? rel : rel.split(sep).join('/');
     }
 
     private static parseDirection(arg: string | undefined): EnergyDirection {
@@ -180,6 +205,7 @@ export class DjSet {
     private static parseStrategy(arg: string | undefined): DjSetStrategy {
         return arg === 'beam' ? 'beam' : 'greedy';
     }
+
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

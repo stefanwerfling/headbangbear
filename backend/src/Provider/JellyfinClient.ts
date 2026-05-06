@@ -1,5 +1,5 @@
 import type {
-    JellyfinSettings,
+    JellyfinConnection,
     JellyfinTestResult,
 } from '@headbangbear/schemas';
 
@@ -35,9 +35,9 @@ export interface JellyfinAudioItem {
  */
 export class JellyfinClient {
 
-    private readonly settings: JellyfinSettings;
+    private readonly settings: JellyfinConnection;
 
-    public constructor(settings: JellyfinSettings) {
+    public constructor(settings: JellyfinConnection) {
         this.settings = settings;
     }
 
@@ -221,10 +221,7 @@ export class JellyfinClient {
             );
             // eslint-disable-next-line no-console
             console.log(`[jellyfin] listAudioItems page → StartIndex=${startIndex.toString()}`);
-            const response: Response = await fetch(url, {
-                headers: this.headers(),
-                signal: AbortSignal.timeout(60_000),
-            });
+            const response: Response = await this.fetchPageWithRetry(url);
             if (!response.ok) {
                 throw new Error(
                     `Jellyfin /Items returned ${response.status.toString()} ${response.statusText}`,
@@ -257,6 +254,41 @@ export class JellyfinClient {
         // eslint-disable-next-line no-console
         console.log(`[jellyfin] listAudioItems → ${all.length.toString()} items collected`);
         return all;
+    }
+
+    /** GET a single listing page with retry-on-timeout/network-error. Each
+     *  attempt has a generous 180s timeout (slow Jellyfin behind a reverse proxy
+     *  can take that long to assemble a 500-item page). After three failed
+     *  attempts the error is rethrown so the scan surfaces it as a fatal. */
+    private async fetchPageWithRetry(url: string): Promise<Response> {
+        const maxAttempts: number = 3;
+        const baseBackoffMs: number = 1500;
+        let lastError: unknown = new Error('unknown');
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                return await fetch(url, {
+                    headers: this.headers(),
+                    signal: AbortSignal.timeout(180_000),
+                });
+            } catch (err) {
+                lastError = err;
+                const detail: string = err instanceof Error ? err.message : String(err);
+                // eslint-disable-next-line no-console
+                console.warn(
+                    `[jellyfin] page attempt ${attempt.toString()}/${maxAttempts.toString()} failed: ${detail}`,
+                );
+                if (attempt === maxAttempts) {
+                    break;
+                }
+                // Exponential backoff: 1.5s, 3s. Jellyfin under load tends to
+                // recover within seconds; longer backoffs just stall the scan.
+                const wait: number = baseBackoffMs * 2 ** (attempt - 1);
+                await new Promise<void>((resolve): void => {
+                    setTimeout(resolve, wait);
+                });
+            }
+        }
+        throw lastError instanceof Error ? lastError : new Error(String(lastError));
     }
 
     /**

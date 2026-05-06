@@ -43,6 +43,7 @@ export const TransitionStyleSchema = Vts.or([
 export type TransitionStyle = ExtractSchemaResultType<typeof TransitionStyleSchema>;
 
 const TrackSummarySchema = Vts.object({
+    providerId: Vts.string(),
     path: Vts.string(),
     camelot: Vts.string(),
     bpm: Vts.number(),
@@ -51,6 +52,7 @@ const TrackSummarySchema = Vts.object({
 });
 
 const TargetTrackSchema = Vts.object({
+    providerId: Vts.string(),
     path: Vts.string(),
     camelot: Vts.string(),
     originalBpm: Vts.number(),

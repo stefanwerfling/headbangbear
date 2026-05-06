@@ -1,12 +1,18 @@
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { DataSource, Repository } from 'typeorm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { AudioAnalyzer } from '../../src/Analysis/AudioAnalyzer.js';
 import { Camelot } from '../../src/Analysis/Camelot.js';
 import { OpenKey } from '../../src/Analysis/OpenKey.js';
 import type { AnalysisResult, MusicalKey } from '../../src/Analysis/schemas.js';
+import { AnalyzedTrackEntity } from '../../src/Database/Entity/AnalyzedTrackEntity.js';
+import { TrackMetadataEntity } from '../../src/Database/Entity/TrackMetadataEntity.js';
 import { TrackLibrary, type AnalyzedTrack } from '../../src/Library/TrackLibrary.js';
+import { createInMemoryDataSource } from '../helpers/testDataSource.js';
+
+const PROVIDER_ID: string = 'test-local';
 
 class FakeAnalyzer extends AudioAnalyzer {
     public callCount: number = 0;
@@ -20,6 +26,9 @@ class FakeAnalyzer extends AudioAnalyzer {
 
     public override analyze(filePath: string): Promise<AnalysisResult> {
         this.callCount += 1;
+        if (typeof filePath !== 'string') {
+            return Promise.reject(new Error('FakeAnalyzer only handles file-path inputs'));
+        }
         const r: AnalysisResult | undefined = this.results.get(filePath);
         if (r === undefined) {
             return Promise.reject(new Error(`No fixture for ${filePath}`));
@@ -51,14 +60,19 @@ function buildResult(key: MusicalKey, bpm: number, energy: number = 0.5): Analys
 
 describe('TrackLibrary', (): void => {
     let dir: string;
-    let cachePath: string;
+    let ds: DataSource;
+    let trackRepo: Repository<AnalyzedTrackEntity>;
+    let metaRepo: Repository<TrackMetadataEntity>;
 
     beforeEach(async (): Promise<void> => {
         dir = await fs.mkdtemp(join(tmpdir(), 'hbb-library-'));
-        cachePath = join(dir, '.analysis-cache.json');
+        ds = await createInMemoryDataSource();
+        trackRepo = ds.getRepository(AnalyzedTrackEntity);
+        metaRepo = ds.getRepository(TrackMetadataEntity);
     });
 
     afterEach(async (): Promise<void> => {
+        await ds.destroy();
         await fs.rm(dir, { recursive: true, force: true });
     });
 
@@ -66,6 +80,10 @@ describe('TrackLibrary', (): void => {
         const filePath: string = join(dir, name);
         await fs.writeFile(filePath, Buffer.alloc(bytes));
         return filePath;
+    }
+
+    function newLib(analyzer: FakeAnalyzer): TrackLibrary {
+        return new TrackLibrary(PROVIDER_ID, dir, analyzer, trackRepo, metaRepo);
     }
 
     it('analyzes every mp3 in a directory on first scan', async (): Promise<void> => {
@@ -76,28 +94,28 @@ describe('TrackLibrary', (): void => {
             [b, buildResult({ tonic: 'C', mode: 'major' }, 122)],
         ]);
         const analyzer: FakeAnalyzer = new FakeAnalyzer(fixtures);
-        const lib: TrackLibrary = new TrackLibrary(analyzer, cachePath);
+        const lib: TrackLibrary = newLib(analyzer);
 
-        const tracks: AnalyzedTrack[] = await lib.scan(dir);
+        const tracks: AnalyzedTrack[] = await lib.scan();
 
         expect(tracks).toHaveLength(2);
         expect(analyzer.callCount).toBe(2);
         expect(tracks.map((t): string => t.result.camelot.toString()).sort()).toEqual(['8A', '8B']);
+        expect(tracks.every((t): boolean => t.providerId === PROVIDER_ID)).toBe(true);
     });
 
-    it('reuses cache on a second scan when file mtime+size unchanged', async (): Promise<void> => {
-        const a: string = await writeFakeMp3('a.mp3');
+    it('reuses DB rows on a second scan when file mtime+size unchanged', async (): Promise<void> => {
+        await writeFakeMp3('a.mp3');
+        const abs: string = join(dir, 'a.mp3');
         const fixtures: Map<string, AnalysisResult> = new Map([
-            [a, buildResult({ tonic: 'A', mode: 'minor' }, 128)],
+            [abs, buildResult({ tonic: 'A', mode: 'minor' }, 128)],
         ]);
         const analyzer: FakeAnalyzer = new FakeAnalyzer(fixtures);
 
-        const lib1: TrackLibrary = new TrackLibrary(analyzer, cachePath);
-        await lib1.scan(dir);
+        await newLib(analyzer).scan();
         expect(analyzer.callCount).toBe(1);
 
-        const lib2: TrackLibrary = new TrackLibrary(analyzer, cachePath);
-        await lib2.scan(dir);
+        await newLib(analyzer).scan();
         expect(analyzer.callCount).toBe(1);
     });
 
@@ -107,27 +125,25 @@ describe('TrackLibrary', (): void => {
             [a, buildResult({ tonic: 'A', mode: 'minor' }, 128)],
         ]);
         const analyzer: FakeAnalyzer = new FakeAnalyzer(fixtures);
-        const lib: TrackLibrary = new TrackLibrary(analyzer, cachePath);
+        const lib: TrackLibrary = newLib(analyzer);
 
-        await lib.scan(dir);
+        await lib.scan();
         expect(analyzer.callCount).toBe(1);
 
         await fs.writeFile(a, Buffer.alloc(32));
-        await lib.scan(dir);
+        await lib.scan();
         expect(analyzer.callCount).toBe(2);
     });
 
-    it('deserializes cache entries back into Camelot and OpenKey instances', async (): Promise<void> => {
+    it('deserializes DB rows back into Camelot and OpenKey instances', async (): Promise<void> => {
         const a: string = await writeFakeMp3('a.mp3');
         const fixtures: Map<string, AnalysisResult> = new Map([
             [a, buildResult({ tonic: 'A', mode: 'minor' }, 128)],
         ]);
 
-        const lib1: TrackLibrary = new TrackLibrary(new FakeAnalyzer(fixtures), cachePath);
-        await lib1.scan(dir);
+        await newLib(new FakeAnalyzer(fixtures)).scan();
 
-        const lib2: TrackLibrary = new TrackLibrary(new FakeAnalyzer(new Map()), cachePath);
-        const tracks: AnalyzedTrack[] = await lib2.scan(dir);
+        const tracks: AnalyzedTrack[] = await newLib(new FakeAnalyzer(new Map())).scan();
         const track: AnalyzedTrack | undefined = tracks[0];
         expect(track).toBeDefined();
         expect(track?.result.camelot).toBeInstanceOf(Camelot);
@@ -140,18 +156,21 @@ describe('TrackLibrary', (): void => {
         ]);
     });
 
-    it('rejects a corrupt cache file gracefully and re-analyzes', async (): Promise<void> => {
+    it('prunes DB rows for files that disappeared from disk', async (): Promise<void> => {
         const a: string = await writeFakeMp3('a.mp3');
-        await fs.writeFile(cachePath, '{"this": "is", "not": "a valid cache"}', 'utf8');
+        const b: string = await writeFakeMp3('b.mp3');
+        const fixtures: Map<string, AnalysisResult> = new Map([
+            [a, buildResult({ tonic: 'A', mode: 'minor' }, 128)],
+            [b, buildResult({ tonic: 'C', mode: 'major' }, 122)],
+        ]);
+        await newLib(new FakeAnalyzer(fixtures)).scan();
+        expect(await trackRepo.count()).toBe(2);
 
-        const analyzer: FakeAnalyzer = new FakeAnalyzer(
-            new Map([[a, buildResult({ tonic: 'A', mode: 'minor' }, 128)]]),
-        );
-        const lib: TrackLibrary = new TrackLibrary(analyzer, cachePath);
-        const tracks: AnalyzedTrack[] = await lib.scan(dir);
-
-        expect(analyzer.callCount).toBe(1);
-        expect(tracks).toHaveLength(1);
+        await fs.unlink(b);
+        await newLib(new FakeAnalyzer(fixtures)).scan();
+        expect(await trackRepo.count()).toBe(1);
+        const remaining: AnalyzedTrackEntity[] = await trackRepo.find();
+        expect(remaining[0]?.sourceId).toBe('a.mp3');
     });
 
     it('compatible() returns Camelot-compatible tracks excluding the input', async (): Promise<void> => {
@@ -168,17 +187,17 @@ describe('TrackLibrary', (): void => {
             [eMinor, buildResult({ tonic: 'E', mode: 'minor' }, 126)],
             [fSharpMajor, buildResult({ tonic: 'F#', mode: 'major' }, 140)],
         ]);
-        const lib: TrackLibrary = new TrackLibrary(new FakeAnalyzer(fixtures), cachePath);
-        await lib.scan(dir);
+        const lib: TrackLibrary = newLib(new FakeAnalyzer(fixtures));
+        await lib.scan();
 
-        const aMinorTrack: AnalyzedTrack | null = lib.findByPath(aMinor);
+        const aMinorTrack: AnalyzedTrack | null = lib.findByPath('a-minor.mp3');
         expect(aMinorTrack).not.toBeNull();
         const matches: AnalyzedTrack[] = lib.compatible(aMinorTrack!);
 
         const matchPaths: string[] = matches.map((t): string => t.path);
-        expect(matchPaths).toEqual([aMinorOther, eMinor, cMajor]);
-        expect(matchPaths).not.toContain(aMinor);
-        expect(matchPaths).not.toContain(fSharpMajor);
+        expect(matchPaths).toEqual(['a-minor-other.mp3', 'e-minor.mp3', 'c-major.mp3']);
+        expect(matchPaths).not.toContain('a-minor.mp3');
+        expect(matchPaths).not.toContain('f-sharp-major.mp3');
     });
 
     it('sorts compatible() by BPM proximity', async (): Promise<void> => {
@@ -191,10 +210,10 @@ describe('TrackLibrary', (): void => {
             [close, buildResult({ tonic: 'A', mode: 'minor' }, 130)],
             [far, buildResult({ tonic: 'A', mode: 'minor' }, 90)],
         ]);
-        const lib: TrackLibrary = new TrackLibrary(new FakeAnalyzer(fixtures), cachePath);
-        await lib.scan(dir);
+        const lib: TrackLibrary = newLib(new FakeAnalyzer(fixtures));
+        await lib.scan();
 
-        const matches: AnalyzedTrack[] = lib.compatible(lib.findByPath(seed)!);
-        expect(matches.map((t): string => t.path)).toEqual([close, far]);
+        const matches: AnalyzedTrack[] = lib.compatible(lib.findByPath('seed.mp3')!);
+        expect(matches.map((t): string => t.path)).toEqual(['close.mp3', 'far.mp3']);
     });
 });

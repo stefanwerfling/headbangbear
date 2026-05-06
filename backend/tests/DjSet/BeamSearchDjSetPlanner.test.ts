@@ -40,7 +40,7 @@ function buildTrack(opts: BuildOpts): AnalyzedTrack {
         energyTimeline: energyTimeline,
         drops: [],
     };
-    const track: AnalyzedTrack = { path: opts.path, result: result, hasCover: false };
+    const track: AnalyzedTrack = { providerId: 'test', path: opts.path, result: result, hasCover: false, disabled: false };
     if (opts.artist !== undefined) {
         track.metadata = { artist: opts.artist };
     }

@@ -12,6 +12,7 @@ import {
 } from '@headbangbear/schemas';
 import { JellyfinClient } from '../../Provider/JellyfinClient.js';
 import { SettingsStore } from '../../Settings/SettingsStore.js';
+import { LibraryService } from '../LibraryService.js';
 
 /**
  * Settings management endpoints.
@@ -19,9 +20,9 @@ import { SettingsStore } from '../../Settings/SettingsStore.js';
  *  - `GET  /api/v1/settings` — returns the persisted settings (or defaults if no save
  *    has happened yet). The frontend uses it to seed the form on first paint.
  *  - `POST /api/v1/settings` — replaces the persisted settings wholesale (no patching).
- *  - `POST /api/v1/settings/jellyfin/test` — connection probe. Lets the user verify a
+ *  - `POST /api/v1/settings/jellyfin-test` — connection probe. Lets the user verify a
  *    set of credentials from the Settings form *without* saving them, so a typo doesn't
- *    overwrite working settings. Body shape mirrors `JellyfinSettings`.
+ *    overwrite working settings. Body shape mirrors `JellyfinConnection`.
  */
 export class SettingsRoute extends DefaultRoute {
 
@@ -39,6 +40,11 @@ export class SettingsRoute extends DefaultRoute {
 
     public async save(body: SettingsBody): Promise<Settings> {
         await this.store.save(body);
+        // Re-bind the LibraryService's provider map so freshly-added providers take
+        // effect without a backend restart. Done after persistence so a failed reload
+        // doesn't lose the user's edit. `getInstance()` is safe here — figtree starts
+        // LibraryService before the HTTP layer accepts requests.
+        await LibraryService.getInstance().reloadProviders();
         return this.store.load();
     }
 
