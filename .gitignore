@@ -14,5 +14,6 @@ coverage/
 backend/config.json
 backend/logs/
 backend/.hbb-settings.json
+backend/.hbb-data/
 frontend/assets/
 samples/
